@@ -66,7 +66,7 @@
 #   --since T        newer than Nd or Nh ago, or a YYYY-MM-DD date (UTC)
 #   --agent A, --category C, --tool T, --fixable V    exact matches
 #   --project S      project or cwd contains S
-#   --top N          --group: only the N biggest groups (default: all)
+#   --top N          --group: only the N biggest groups (default 0 = all)
 #   --limit N        --group: texts shown per group (default 30)
 # --stats counts sessions over the --since window in days (default 30).
 #
@@ -200,18 +200,18 @@ TOP=0            # --group: groups shown (0 = all)
 WINDOW_DAYS=30   # --stats: the per-session rate window
 
 parse_filters() {
-  local since="" agent="" category="" tool="" fixable="" project="" from
+  local since="" agent="" category="" tool="" fixable="" project="" from tool_given=0 any=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --since | --agent | --category | --tool | --fixable | --project | --limit | --top)
         [ $# -ge 2 ] || die "$1 requires a value"
         case "$1" in
-          --since) since="$2" ;;
-          --agent) agent="$2" ;;
-          --category) category="$2" ;;
-          --tool) tool="$2" ;;
-          --fixable) fixable="$2" ;;
-          --project) project="$2" ;;
+          --since) since="$2"; any=1 ;;
+          --agent) agent="$2"; any=1 ;;
+          --category) category="$2"; any=1 ;;
+          --tool) tool="$2"; tool_given=1; any=1 ;;
+          --fixable) fixable="$2"; any=1 ;;
+          --project) project="$2"; any=1 ;;
           --limit) LIMIT="$2" ;;
           --top) TOP="$2" ;;
         esac
@@ -234,10 +234,11 @@ parse_filters() {
   if [ -n "$since" ]; then
     local now n
     now=$(date +%s)
+    # 10# reads a number like 08 as decimal, not octal.
     if [[ "$since" =~ ^([0-9]+)d$ ]]; then
-      n="${BASH_REMATCH[1]}"; from=$((now - n * 86400)); WINDOW_DAYS="$n"
+      n=$((10#${BASH_REMATCH[1]})); from=$((now - n * 86400)); WINDOW_DAYS="$n"
     elif [[ "$since" =~ ^([0-9]+)h$ ]]; then
-      n="${BASH_REMATCH[1]}"; from=$((now - n * 3600)); WINDOW_DAYS=$(((n + 23) / 24))
+      n=$((10#${BASH_REMATCH[1]})); from=$((now - n * 3600)); WINDOW_DAYS=$(((n + 23) / 24))
     elif [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
       # Round-trip the date, since fromdateiso8601 quietly rolls 02-30 into March.
       from=$(jq -ne --arg d "$since" '($d + "T00:00:00Z") | fromdateiso8601
@@ -247,12 +248,19 @@ parse_filters() {
     else
       die "--since takes Nd, Nh or YYYY-MM-DD, got '$since'"
     fi
+    [ "$from" -le "$now" ] || die "--since '$since' is in the future"
+    [ "$WINDOW_DAYS" -ge 1 ] || WINDOW_DAYS=1
   fi
 
+  # No filters: keep the {} sentinel so --tail can read just the end of the file.
+  if [ "$any" -eq 0 ]; then FILTER='{}'; return; fi
+
   FILTER=$(jq -nc --argjson since "$from" --arg agent "$agent" --arg category "$category" \
-    --arg tool "$tool" --arg fixable "$fixable" --arg project "$project" \
+    --arg tool "$tool" --argjson tool_given "$tool_given" --arg fixable "$fixable" --arg project "$project" \
     'def nul: if . == "" then null else . end;
-     {since: $since, agent: ($agent | nul), category: ($category | nul), tool: ($tool | nul),
+     # An explicit --tool "" selects the entries logged without a tool.
+     {since: $since, agent: ($agent | nul), category: ($category | nul),
+      tool: (if $tool_given == 1 then $tool else null end),
       fixable: ($fixable | nul), project: ($project | nul)}') || exit 1
 }
 
@@ -439,10 +447,10 @@ do_triage() {
     # Entries are prepared once and indexed by tool; a decision naming a tool
     # only looks at that tool'"'"'s entries.
     [$log[] | . + {_et: (.ts | epoch)}] as $L
-    | ($L | group_by(.tool // "") | map({key: (.[0].tool // ""), value: .}) | from_entries) as $by_tool
+    | ($L | group_by(.tool // "" | tostring) | map({key: (.[0].tool // "" | tostring), value: .}) | from_entries) as $by_tool
     | inputs
     | . as $d
-    | [(if ($d.tool // "") != "" then ($by_tool[$d.tool] // []) else $L end)[] | select(hit($d))] as $h
+    | [(if ($d.tool // "") != "" then ($by_tool[$d.tool | tostring] // []) else $L end)[] | select(hit($d))] as $h
     | ($d.ts | epoch) as $dt
     | ($h | length) as $n
     | ([$h[] | select(._et > $dt)] | length) as $m
@@ -471,14 +479,14 @@ do_annotate() {
     # Decisions are prepared once and indexed by tool, so each entry is only
     # checked against its own tool'"'"'s decisions plus the few without a tool.
     [$dec | to_entries[] | .value + {_dt: (.value.ts | epoch), _i: .key}] as $D
-    | ($D | map(select((.tool // "") != "")) | group_by(.tool)
-       | map({key: .[0].tool, value: .}) | from_entries) as $by_tool
+    | ($D | map(select((.tool // "") != "")) | group_by(.tool | tostring)
+       | map({key: (.[0].tool | tostring), value: .}) | from_entries) as $by_tool
     | [$D[] | select((.tool // "") == "")] as $no_tool
     | inputs
     | select(keep($f))
     | . as $e
     | ($e.ts | epoch) as $et
-    | [(($by_tool[$e.tool // ""] // []) + $no_tool)[] | select(. as $d | $e | hit($d))] as $cov
+    | [(($by_tool[$e.tool // "" | tostring] // []) + $no_tool)[] | select(. as $d | $e | hit($d))] as $cov
     | latest([$cov[] | select(._dt >= $et)]) as $after
     | latest([$cov[] | select(._dt < $et)]) as $before
     | $e + {triage: (
@@ -494,7 +502,9 @@ do_group() {
   do_annotate | jq -sc --argjson limit "$LIMIT" --argjson top "$TOP" "$JQ_LIB"'
     def counts(f): group_by(f) | map({key: (.[0] | f | tostring), value: length}) | from_entries;
     def newest_first: sort_by(.ts | epoch) | reverse;
-    def show: newest_first | .[:$limit] | map({ts, agent, category, fixable, project, text});
+    def show: newest_first | .[:$limit]
+      | map({ts, agent, category, fixable, project, text}
+            + (if .triage.state == "after_ticketed" then {ticket: (.triage.ref // "-")} else {} end));
     def omitted: if length > $limit then length - $limit else 0 end;
     def by_decision: group_by([.triage.decision_ts, .triage.tool, .triage.match, .triage.fixable]);
     map(map_values(safe) | .triage |= (if . then map_values(safe) else . end)) as $all
@@ -513,7 +523,6 @@ do_group() {
             agents: counts(.agent // "unknown"),
             fixable: counts(.fixable // ""),
             projects: (map(.project // "") | unique),
-            tickets: ([.[] | select(.triage.state == "after_ticketed") | .triage.ref // "-"] | unique),
             entries: show,
             omitted: omitted
           }) | sort_by([-.count, -(.last | epoch)]) | if $top > 0 then .[:$top] else . end),
@@ -548,12 +557,16 @@ do_stats() {
       | "\($c / 100 | floor).\($c % 100 | tostring | if length < 2 then "0" + . else . end)";
     def table($xs): $xs | map("  \(.key | pad(12)) \(.value)") | join("\n");
     def counts(f): group_by(f) | map({key: (.[0] | f | tostring | safe), value: length}) | sort_by(-.value);
+    def localday: epoch | strflocaltime("%Y-%m-%d");
     (now - $days * 86400) as $from
-    | . as $everything
     | [.[] | select(keep($f))] as $all
-    | [range(13; -1; -1) | (now - . * 86400) | strflocaltime("%Y-%m-%d")] as $daylist
-    | ($all | map(.ts[0:10]) | group_by(.) | map({key: .[0], value: length}) | from_entries) as $per_day
-    | [$everything[] | select((.ts | epoch) >= $from)] as $recent
+    # Day labels step back from local noon, so a DST change never skips or
+    # repeats a date; entries are bucketed by their local date too.
+    | (now | localtime | .[3] * 3600 + .[4] * 60 + (.[5] | floor)) as $since_midnight
+    | (now - $since_midnight + 43200) as $noon
+    | [range(13; -1; -1) | ($noon - . * 86400) | strflocaltime("%Y-%m-%d")] as $daylist
+    | ($all | map(.ts | localday) | group_by(.) | map({key: .[0], value: length}) | from_entries) as $per_day
+    | [$all[] | select((.ts | epoch) >= $from)] as $recent
     | "entries: \($all | length)",
       "by category:", table($all | counts(.category // "")),
       "by agent:", table($all | counts(.agent // "unknown")),
@@ -564,8 +577,8 @@ do_stats() {
       (["claude", "codex", "grok"] | map(. as $a
         | ([$recent[] | select(.agent == $a)] | length) as $n
         | $sessions[$a] as $s
-        | "  \($a | pad(8)) \($n) / \($s) sessions = "
-          + (if $s > 0 then ($n / $s | two) else "-" end))
+        | if $s > 0 then "  \($a | pad(8)) \($n) / \($s) sessions = \($n / $s | two)"
+          else "  \($a | pad(8)) \($n) papercuts, n/a (no session files found)" end)
         | join("\n")),
       "  (\([$recent[] | select((.agent // "unknown") == "unknown")] | length) more with no agent)"'
 }

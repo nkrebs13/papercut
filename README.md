@@ -24,8 +24,9 @@ You don't run that yourself; your agents do. You read the results.
 
 ## Install
 
-You need bash, [jq](https://jqlang.org) and python3 (`brew install jq` or
-`apt install jq`). Python 3.11 or later is only needed for one Codex step.
+You need bash, curl, tar, [jq](https://jqlang.org) and python3 (`brew install jq`
+or `apt install jq`). Python 3.11 or later is only needed for the Codex config
+edit; without it that one step is skipped.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nkrebs13/papercut/main/get.sh | bash
@@ -47,16 +48,22 @@ update. Here's what it changes:
 The installer backs up every file before changing it. To check or remove it:
 
 ```bash
-~/.local/share/papercut/install.sh --check       # what's missing or out of date
-~/.local/share/papercut/install.sh --uninstall   # remove what it added
-rm -rf ~/.local/share/papercut
+~/.local/share/papercut/install.sh --check    # what's missing or out of date
+~/.local/share/papercut/install.sh --uninstall && rm -rf ~/.local/share/papercut
 ```
 
-Uninstall keeps your log and the `*.bak-papercut-*` backups.
+Uninstall removes the `papercut` command and everything else it added, and keeps
+your log and the `*.bak-papercut-*` backups.
 
-To work from a clone instead, `git clone` the repo and run `./install.sh` in
-it (same flags). The installed pieces then point into the clone, so keep it
-where it is, and run `./install.sh` again after a `git pull`.
+To work from a clone instead:
+
+```bash
+git clone https://github.com/nkrebs13/papercut.git && cd papercut && ./install.sh
+```
+
+It takes the same flags. The installed pieces then point into the clone (it
+repoints any made by the one-liner), so keep the clone where it is and run
+`./install.sh` again after a `git pull`.
 
 Grok reads Claude's rules and skills unless `[compat.claude]` in
 `~/.grok/config.toml` turns that off. So if you install for Claude but not

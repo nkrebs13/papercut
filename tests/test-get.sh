@@ -17,7 +17,9 @@ mkdir -p "$T/pkg/papercut-test"
 tar -czf "$T/papercut.tar.gz" -C "$T/pkg" papercut-test
 export PAPERCUT_TARBALL="$T/papercut.tar.gz"
 
+mkdir -p "$T/tmp"; export TMPDIR="$T/tmp"
 out=$(bash "$HERE/get.sh" --agents claude 2>&1); check "fresh install exits 0" 0 "$?"
+check "the download is cleaned up" 0 "$(find "$T/tmp" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
 check "installs into ~/.local/share/papercut" yes "$([[ -x "$DEST/bin/papercut" && -f "$DEST/.papercut-get" ]] && echo yes)"
 check "the CLI link points there" "$DEST/bin/papercut" "$(readlink "$HOME/.local/bin/papercut")"
 check "the installed CLI runs" 1 "$("$HOME/.local/bin/papercut" --version | grep -c '^papercut ')"

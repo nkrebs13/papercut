@@ -7,14 +7,15 @@
   installer; run it again to update.
 - `papercut --group` prints the open papercuts grouped by tool, along with
   fixes that didn't hold, recurring wontfix decisions and resolved counts, as
-  one JSON object. `papercut --stats` prints counts, a 14-day trend and how
-  often each agent logs per session.
+  one JSON object (`papercut --help` lists what's in it). `papercut --stats`
+  prints counts, a 14-day trend and how often each agent logs per session.
 - Read filters for `--tail`, `--group`, `--stats` and `--annotate`: `--since`,
   `--agent`, `--category`, `--tool`, `--fixable` and `--project`.
 - The papercuts skill now reads `papercut --group` and `papercut --stats`
   instead of running its own jq, so it is shorter and its data path is tested.
-- `--annotate` and `--triage` are about three times faster on large logs:
-  decisions and entries are matched by tool instead of every pair.
+- `--annotate` and `--triage` are about three times faster on large logs
+  (on a 4,800-entry log with 230 decisions, `--annotate` went from about 4.0 s
+  to 1.3 s): decisions and entries are matched by tool instead of every pair.
 
 ## 0.1.0 - 2026-10-28
 

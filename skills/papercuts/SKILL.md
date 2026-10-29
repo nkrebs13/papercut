@@ -26,36 +26,40 @@ to `papercut`:
 - `--project X` (substring of the project or cwd)
 - exact `--agent`, `--category`, `--tool` and `--fixable`
 
-A bare invocation triages everything, all time.
+Filters go after the mode flag (`papercut --group --since 7d`), since the first argument picks
+the mode. A bare invocation triages everything, all time.
 
 ## Procedure
 
 ### 1. Load
 
 ```bash
-papercut --count
 papercut --group --top 15 --limit 5 [filters]
 ```
 
-If the total is 0, say so plainly. Mention that agents log with `papercut '...'` as described
+If `entries` is 0, say so plainly. Mention that agents log with `papercut '...'` as described
 in `AGENT-INSTRUCTIONS.md` (https://github.com/nkrebs13/papercut), and stop. Never invent
-entries.
+entries. If there are entries but `group_count` is 0 and `regressions` is empty, say that
+everything logged is resolved, give the `resolved` counts, and stop.
 
 `papercut --group` prints one JSON object with everything triage needs. Damaged log lines
 are already skipped, and the triage ledger is already applied:
 
 | Field | What it holds |
 |---|---|
-| `groups` | Open entries (untriaged, or after a ticketed decision), grouped by tool, biggest first. Each has `count`, `first`, `last`, `categories`, `agents`, `fixable`, `projects`, `tickets` (refs of ticketed decisions), and the newest `entries` (ts, agent, category, fixable, project, text), with `omitted` for the rest. |
+| `entries` | How many entries passed the filters. |
+| `states` | Those entries counted by triage state: untriaged, resolved, regressed, after_ticketed, after_wontfix. |
+| `groups` | Open entries (untriaged, or logged after a ticketed decision), grouped by tool, biggest first. Each has `count`, `first`, `last`, `categories`, `agents`, `fixable`, `projects`, and the newest `entries` (ts, agent, category, fixable, project, text, plus `ticket` when a ticketed decision covers it), with `omitted` for the rest. |
 | `group_count` | How many groups there are in all. `--top` shows only the biggest. |
 | `regressions` | Fixes that didn't hold: per `fixed` decision, its reason, ref, the hits logged since, and their texts. |
 | `wontfix_resurfacing` | `wontfix` decisions with 5 or more hits since, with the original reason. |
 | `already_fixed` | Untriaged entries logged as `fixable: fixed`, as a count and per tool. |
 | `resolved` | Entries covered by a decision, and how many decisions cover them. |
 
-To see every text of a group before clustering it, run
-`papercut --group --tool <tool> --limit 100`. If `group_count` is larger than what you loaded,
-say how many groups you skipped.
+For each group you'll report whose `omitted` is above 0, load all its texts before clustering:
+`papercut --group --tool '<tool>' --limit 100` (`--tool ''` for the group without a tool).
+Groups with `omitted: 0` are complete. If `group_count` is more than the groups you loaded,
+say how many you skipped.
 
 ### 2. Cluster
 
@@ -97,25 +101,26 @@ Where fixes usually go:
 
 Friction only one agent hits usually points at that agent's instructions or permissions.
 
-Section order:
+Section order. Each entry belongs to exactly one section: entries logged `fixable: fixed` go
+only under Already fixed and don't count toward their cluster's size.
 
 1. **🔁 Fixed but still biting** (first), from `regressions`. Give the reason, ref, hits since,
    and newest text. Say whether the fix was incomplete, didn't reach the path agents actually
    use, or the selector was too broad.
-2. **🔧 Fix now.** Clusters of 3 or more with fixable yes or no.
-3. **👀 Watch.** Clusters of 2, or 1 with high severity, plus `wontfix_resurfacing` with the
-   original reason.
+2. **🔧 Fix now.** Clusters of 3 or more that have a local fix, whatever their fixable value.
+3. **👀 Watch.** Clusters of 2, or a single entry that blocked the task, plus
+   `wontfix_resurfacing` with the original reason.
 4. **✅ Already fixed**, from `already_fixed`. Offer one decision that covers them by field:
    ```bash
    papercut --resolve --dry-run --status fixed --fixable fixed --reason 'self-reported fixed at log time'
    ```
    then the same without `--dry-run`. It is a point in time, so re-run it periodically.
-5. **📋 Not ours.** `fixable: no` with no local fix path. Offer a wontfix decision whose reason
-   names where the workaround is written down.
+5. **📋 Not ours.** Clusters with no local fix path (usually `fixable: no`), whatever their
+   size. Offer a wontfix decision whose reason names where the workaround is written down.
 6. **Tail:** `Resolved: <resolved.decisions> decisions (<resolved.entries> entries)`, and a
    count of the one-off entries you didn't list. Keep the report scannable.
 
-Mark clusters in a group with `tickets` as `(ticketed: <ref>)`.
+Mark a cluster whose entries carry a `ticket` as `(ticketed: <ref>)`.
 
 ### 4. Offer to act
 
@@ -149,7 +154,7 @@ papercut --resolve --status fixed --fixable fixed --reason 'self-reported fixed 
 |---|---|
 | `fixed` | The problem is gone. Later hits are regressions and show at the top. |
 | `wontfix` | Not ours or not worth it, and the workaround is written down. The reason must say where. Returns to Watch at 5 or more later hits. |
-| `ticketed` | Tracked elsewhere, with the ref in `--ref`. Stays visible, annotated. |
+| `ticketed` | Tracked elsewhere, with the ref in `--ref`. Entries up to it count as resolved; later hits come back in `groups`, carrying the ref as `ticket`. |
 
 Ledger honesty:
 
@@ -204,4 +209,6 @@ Reading the per-session rate:
   Check its global instructions: `~/.claude/rules/papercuts.md` for Claude Code (and Grok,
   unless Grok has its own copy in `~/.grok/AGENTS.md`), `~/.codex/AGENTS.md` for Codex. Run
   `install.sh --check` in the papercut repo, and check the Codex sandbox's writable roots.
+- `n/a (no session files found)` means the rate couldn't be measured on this machine, not
+  that it is zero.
 - Many entries with no agent usually means Grok logged without `--agent grok`.

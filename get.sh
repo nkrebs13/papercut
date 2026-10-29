@@ -34,7 +34,7 @@ if [[ -e "$DEST" && ! -f "$DEST/$MARKER" ]]; then
   fail "$DEST exists and wasn't created by get.sh; move it aside, or run install.sh from it"
 fi
 
-work="$(mktemp -d)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/papercut-get.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
 if [[ -n "${PAPERCUT_TARBALL:-}" ]]; then
@@ -43,9 +43,12 @@ if [[ -n "${PAPERCUT_TARBALL:-}" ]]; then
 else
   version="${PAPERCUT_VERSION:-}"
   if [[ -z "$version" ]]; then
-    version="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r '.tag_name // empty')" \
+    # The releases/latest page redirects to .../tag/<version>. Unlike the API,
+    # it isn't limited to 60 requests an hour.
+    latest="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")" \
       || fail "couldn't look up the latest release"
-    [[ -n "$version" ]] || fail "no release found for $REPO"
+    version="${latest##*/tag/}"
+    [[ "$version" != "$latest" && -n "$version" ]] || fail "no release found for $REPO"
   fi
   echo "papercut $version"
   curl -fsSL "https://github.com/$REPO/archive/refs/tags/$version.tar.gz" -o "$work/papercut.tar.gz" \
@@ -58,17 +61,26 @@ tar -xzf "$work/papercut.tar.gz" -C "$work/src" --strip-components 1 || fail "co
 echo "$version" > "$work/src/$MARKER"
 
 # Swap the new copy into place with renames, so a failed download never
-# leaves a half-written install behind.
+# leaves a half-written install behind. Ownership is checked again here, in
+# case something else created the folder while this was downloading.
 mkdir -p "$(dirname "$DEST")"
 staged="$DEST.new.$$"
 rm -rf "$staged"
 mv "$work/src" "$staged"
+if [[ -e "$DEST" && ! -f "$DEST/$MARKER" ]]; then
+  rm -rf "$staged"
+  fail "$DEST appeared while downloading and wasn't created by get.sh; leaving it alone"
+fi
 if [[ -e "$DEST" ]]; then
   mv "$DEST" "$DEST.old.$$"
-  mv "$staged" "$DEST"
+  if ! mv "$staged" "$DEST"; then
+    mv "$DEST.old.$$" "$DEST"
+    fail "couldn't move the new copy into place; kept the previous one"
+  fi
   rm -rf "$DEST.old.$$"
 else
   mv "$staged" "$DEST"
 fi
 
-exec "$DEST/install.sh" "$@"
+# Not exec: the EXIT trap has to run to clean up the download.
+"$DEST/install.sh" "$@"

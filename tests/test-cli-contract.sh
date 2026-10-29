@@ -397,7 +397,7 @@ check "a group's first and last" "2026-01-01T00:00:00-07:00 2026-01-03T00:00:00-
   "$(jq -r '.groups[0] | "\(.first) \(.last)"' <<<"$g")"
 check "a group's texts, newest first" "rg open 3|rg open 2|rg open 1" "$(jq -r '[.groups[0].entries[].text] | join("|")' <<<"$g")"
 check "a group's fixable counts" '{"fixed":1,"yes":1}' "$(jq -c '.groups[] | select(.tool == "gh") | .fixable' <<<"$g")"
-check "a ticketed group carries its ref" '["T-7"]' "$(jq -c '.groups[] | select(.tool == "zz") | .tickets' <<<"$g")"
+check "a ticketed group's entries carry the ref" 'T-7' "$(jq -r '.groups[] | select(.tool == "zz") | .entries[0].ticket' <<<"$g")"
 check "regressions" "fd 1 fd fix PR#9 fd came back" \
   "$(jq -r '.regressions[0] | "\(.tool) \(.count) \(.reason) \(.ref) \(.entries[0].text)"' <<<"$g")"
 check "wontfix resurfacing at 5" "docker 5 upstream" "$(jq -r '.wontfix_resurfacing[0] | "\(.tool) \(.count) \(.reason)"' <<<"$g")"
@@ -410,6 +410,40 @@ e 2026-03-09T00:00:00-07:00 x "$(printf 'esc \033]0;t\007 here')" no
 check "--group strips control characters" 0 "$(pc --group | grep -c $'\x1b')"
 reset
 check "--group with no log" '{"entries":0,"group_count":0}' "$(pc --group | jq -c '{entries, group_count}')"
+
+echo '# read filter edge cases'
+reset
+r 2000-01-01T00:00:00Z claude docs '' no -Users-a-web 'no tool'
+r "$nowts" claude docs gh no -Users-a-web 'gh tool'
+check "--tool '' selects entries without a tool" "no tool|" "$(ann --tool '')"
+pc --annotate --since 08d >/dev/null 2>&1; check "--since 08d is decimal, not octal" 0 "$?"
+check "--since 010d is ten days" 1 "$(pc --stats --since 010d | grep -c 'last 10 days')"
+pc --annotate --since 2099-01-01 >/dev/null 2>&1; check "a future --since exits 2" 2 "$?"
+jq -nc '{ts:"2026-01-01T00:00:00Z",tool:5,text:"odd tool",fixable:"no"}' >> "$LOG"
+d '{"ts":"2026-02-01T00:00:00Z","tool":"gh","match":null,"status":"fixed","reason":"r","ref":null}'
+check "a non-string tool doesn't break --annotate" 1 "$(pc --annotate | grep -c 'odd tool')"
+check "...or --triage" 1 "$(pc --triage | grep -c 'matches: 1')"
+
+echo '# --group tickets'
+reset
+e 2026-01-01T00:00:00-07:00 gh 'gh auth failed' no
+e 2026-03-01T00:00:00-07:00 gh 'gh auth failed again' no
+e 2026-03-02T00:00:00-07:00 gh 'gh timed out' no
+d '{"ts":"2026-02-01T00:00:00-07:00","tool":"gh","match":"auth","status":"ticketed","reason":null,"ref":"T-1"}'
+g=$(pc --group)
+check "only the covered entry carries the ticket" "gh timed out=-|gh auth failed again=T-1" \
+  "$(jq -r '[.groups[0].entries[] | "\(.text)=\(.ticket // "-")"] | join("|")' <<<"$g")"
+check "groups have no tool-wide tickets field" false "$(jq '.groups[0] | has("tickets")' <<<"$g")"
+
+echo '# --stats edge cases'
+reset
+utcnow=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+r "$utcnow" claude docs gh no -Users-a-web 'utc stamped'
+r "$nowts" codex docs gh no -Users-a-web 'codex one'
+check "a UTC-stamped entry lands on its local day" 1 \
+  "$(pc --stats | grep -cE "^  $(date +%Y-%m-%d)  2$")"
+check "rates respect the filters" 1 "$(pc --stats --agent codex | grep -cE '^  claude +0 ')"
+check "no session files: n/a, not a rate" 1 "$(pc --stats | grep -c 'claude   1 papercuts, n/a (no session files found)')"
 
 echo '# --stats'
 reset
