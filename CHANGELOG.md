@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 - 2026-10-28
+
+- One-line install: `curl -fsSL https://raw.githubusercontent.com/nkrebs13/papercut/main/get.sh | bash`
+  downloads the latest release into `~/.local/share/papercut` and runs the
+  installer; run it again to update.
+- `papercut --group` prints the open papercuts grouped by tool, along with
+  fixes that didn't hold, recurring wontfix decisions and resolved counts, as
+  one JSON object. `papercut --stats` prints counts, a 14-day trend and how
+  often each agent logs per session.
+- Read filters for `--tail`, `--group`, `--stats` and `--annotate`: `--since`,
+  `--agent`, `--category`, `--tool`, `--fixable` and `--project`.
+- The papercuts skill now reads `papercut --group` and `papercut --stats`
+  instead of running its own jq, so it is shorter and its data path is tested.
+- `--annotate` and `--triage` are about three times faster on large logs:
+  decisions and entries are matched by tool instead of every pair.
+
 ## 0.1.0 - 2026-10-28
 
 First public release.

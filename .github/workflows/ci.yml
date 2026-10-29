@@ -23,7 +23,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install shellcheck
       - name: shellcheck
-        run: shellcheck bin/papercut install.sh tests/*.sh
+        run: shellcheck bin/papercut install.sh get.sh tests/*.sh
       - name: Tests
         run: for t in tests/test-*.sh; do bash "$t" || exit 1; done
       - name: Tests under the macOS system bash (3.2)

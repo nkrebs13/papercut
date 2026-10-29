@@ -17,8 +17,8 @@
 #            [--fixed] [--] TEXT...
 #   papercut [flags] -              read the text from piped stdin
 #   papercut --resolve --status STATUS SELECTORS... [--reason TEXT]
-#   papercut --tail [N] | --count | --triage | --annotate | --where
-#   papercut --help | --version
+#   papercut --tail [N] | --group | --stats | --annotate [FILTERS...]
+#   papercut --count | --triage | --where | --help | --version
 #
 # EXAMPLES
 #   papercut --tool rg 'searching callers -> unquoted glob aborted -> quote it'
@@ -48,14 +48,27 @@
 #
 # READ MODES
 #   --tail [N]       last N entries (default 10), human-readable
+#   --group          the open papercuts grouped by tool, as one line of JSON:
+#                    groups, fixes that didn't hold, wontfix decisions that
+#                    keep coming back, resolved counts (the skill reads this)
+#   --stats          counts by category, agent, fixable and project, a 14-day
+#                    trend, and papercuts per session for each agent
+#   --annotate       every entry as JSON, plus a "triage" field saying which
+#                    decision covers it
 #   --count          total entries, and entries from the current session
 #   --triage         recorded decisions, with how many entries each covers and
 #                    how many arrived after it
-#   --annotate       every entry as JSON, plus a "triage" field saying which
-#                    decision covers it
 #   --where          the log and ledger paths in use
 # Lines that aren't valid JSON are skipped, so one damaged line never hides
 # the rest.
+#
+# FILTERS (for --tail, --group, --stats and --annotate)
+#   --since T        newer than Nd or Nh ago, or a YYYY-MM-DD date (UTC)
+#   --agent A, --category C, --tool T, --fixable V    exact matches
+#   --project S      project or cwd contains S
+#   --top N          --group: only the N biggest groups (default: all)
+#   --limit N        --group: texts shown per group (default 30)
+# --stats counts sessions over the --since window in days (default 30).
 #
 # RESOLVE MODE (record a decision about a cluster of papercuts)
 #   --status S       fixed, wontfix or ticketed (required)
@@ -89,7 +102,7 @@
 # DEPENDENCIES
 #   bash 3.2+ and jq; git is optional (records the branch). macOS and Linux.
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 MAX_TEXT=2000
 
 set -u
@@ -149,8 +162,16 @@ def hit($d):
   ($d.tool // "") as $t | ($d.match // "") as $m | ($d.fixable // "") as $f
   | ($t != "" or $m != "" or $f != "")
     and ($t == "" or (.tool // "") == $t)
-    and ($m == "" or (try ((.text // "") | test($m; "i")) catch false))
-    and ($f == "" or (.fixable // "") == $f);
+    and ($f == "" or (.fixable // "") == $f)
+    and ($m == "" or (try ((.text // "") | test($m; "i")) catch false));
+# keep($f): does the entry pass the read filters in $f (see parse_filters)?
+def keep($f):
+  ($f.since == null or (.ts | epoch) >= $f.since)
+  and ($f.agent == null or .agent == $f.agent)
+  and ($f.category == null or .category == $f.category)
+  and ($f.tool == null or (.tool // "") == $f.tool)
+  and ($f.fixable == null or .fixable == $f.fixable)
+  and ($f.project == null or (((.project // "") + "\n" + (.cwd // "")) | contains($f.project)));
 '
 
 # valid FILE: the file's JSON lines, skipping any that don't parse.
@@ -170,6 +191,69 @@ append() {
     echo "papercut: couldn't write to $file" >&2
     exit 1
   fi
+}
+
+# --- Read filters, shared by --tail, --annotate, --group and --stats ---------
+FILTER='{}'      # JSON object for keep($f); {} keeps everything
+LIMIT=30         # --group: entries shown per group
+TOP=0            # --group: groups shown (0 = all)
+WINDOW_DAYS=30   # --stats: the per-session rate window
+
+parse_filters() {
+  local since="" agent="" category="" tool="" fixable="" project="" from
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --since | --agent | --category | --tool | --fixable | --project | --limit | --top)
+        [ $# -ge 2 ] || die "$1 requires a value"
+        case "$1" in
+          --since) since="$2" ;;
+          --agent) agent="$2" ;;
+          --category) category="$2" ;;
+          --tool) tool="$2" ;;
+          --fixable) fixable="$2" ;;
+          --project) project="$2" ;;
+          --limit) LIMIT="$2" ;;
+          --top) TOP="$2" ;;
+        esac
+        shift 2 ;;
+      -*) die_flag "$1" "$MODE_NAME" ;;
+      *) die "unexpected argument '$1'" ;;
+    esac
+  done
+  case "$LIMIT" in '' | *[!0-9]*) die "--limit takes a number, got '$LIMIT'" ;; esac
+  case "$TOP" in '' | *[!0-9]*) die "--top takes a number, got '$TOP'" ;; esac
+  case "$category" in
+    "" | tooling | env | docs | shell | test | codebase | other) ;;
+    *) die "invalid --category '$category' (valid: tooling env docs shell test codebase other)" ;;
+  esac
+  if [ -n "$fixable" ] && ! valid_fixable "$fixable"; then
+    die "invalid --fixable '$fixable' (valid: yes no fixed)"
+  fi
+
+  from="null"
+  if [ -n "$since" ]; then
+    local now n
+    now=$(date +%s)
+    if [[ "$since" =~ ^([0-9]+)d$ ]]; then
+      n="${BASH_REMATCH[1]}"; from=$((now - n * 86400)); WINDOW_DAYS="$n"
+    elif [[ "$since" =~ ^([0-9]+)h$ ]]; then
+      n="${BASH_REMATCH[1]}"; from=$((now - n * 3600)); WINDOW_DAYS=$(((n + 23) / 24))
+    elif [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      # Round-trip the date, since fromdateiso8601 quietly rolls 02-30 into March.
+      from=$(jq -ne --arg d "$since" '($d + "T00:00:00Z") | fromdateiso8601
+        | if (todate[0:10]) == $d then . else error end' 2>/dev/null) \
+        || die "invalid --since date '$since'"
+      WINDOW_DAYS=$(((now - from + 86399) / 86400))
+    else
+      die "--since takes Nd, Nh or YYYY-MM-DD, got '$since'"
+    fi
+  fi
+
+  FILTER=$(jq -nc --argjson since "$from" --arg agent "$agent" --arg category "$category" \
+    --arg tool "$tool" --arg fixable "$fixable" --arg project "$project" \
+    'def nul: if . == "" then null else . end;
+     {since: $since, agent: ($agent | nul), category: ($category | nul), tool: ($tool | nul),
+      fixable: ($fixable | nul), project: ($project | nul)}') || exit 1
 }
 
 do_write() {
@@ -318,25 +402,27 @@ do_resolve() {
 }
 
 do_count() {
-  local total=0 mine=0 lines=0
-  if [ -f "$LOG" ]; then
-    lines=$(grep -c . "$LOG")
-    total=$(valid "$LOG" | grep -c .)
-    if [ "$SESSION" != "unknown" ]; then
-      mine=$(valid "$LOG" | jq -n --arg s "$SESSION" '[inputs | select(.session_id == $s)] | length')
-    fi
-  fi
-  printf 'total: %s\nthis session: %s\n' "${total:-0}" "${mine:-0}"
-  if [ "${lines:-0}" -gt "${total:-0}" ]; then
-    echo "skipped: $((lines - total)) lines that aren't valid JSON"
+  local counts lines ok mine
+  counts=$( { if [ -f "$LOG" ]; then cat "$LOG"; fi; } | jq -nrR --arg s "$SESSION" '
+    reduce (inputs | select(length > 0)) as $line ({lines: 0, ok: 0, mine: 0};
+      .lines += 1
+      | ([$line | fromjson? // empty] | first) as $e
+      | if $e == null then .
+        else .ok += 1 | if $s != "unknown" and $e.session_id == $s then .mine += 1 else . end end)
+    | "\(.lines) \(.ok) \(.mine)"') || exit 1
+  read -r lines ok mine <<<"$counts"
+  printf 'total: %s\nthis session: %s\n' "$ok" "$mine"
+  if [ "$lines" -gt "$ok" ]; then
+    echo "skipped: $((lines - ok)) lines that aren't valid JSON"
   fi
 }
 
 do_tail() {
-  local n="${1:-10}"
-  case "$n" in '' | *[!0-9]*) die "--tail takes a number, got '$n'" ;; esac
+  local n="$1"
   if [ ! -f "$LOG" ]; then echo "no papercuts logged yet"; return 0; fi
-  tail -n "$n" "$LOG" | jq -r -R "$JQ_LIB"'
+  # Without filters only the end of the file is read; with them, all of it.
+  if [ "$FILTER" = '{}' ]; then tail -n "$n" "$LOG"; else valid "$LOG" | jq -c --argjson f "$FILTER" "$JQ_LIB"'select(keep($f))' | tail -n "$n"; fi \
+  | jq -r -R "$JQ_LIB"'
     fromjson? // empty
     | map_values(safe)
     | "\(.ts)  \(.agent // "?")  [\(.category // "?")\(if (.tool // "") != "" then "/" + .tool else "" end)]  fixable=\(.fixable // "?")\n  \(.text)\n"'
@@ -347,14 +433,19 @@ do_triage() {
     echo "no triage decisions yet ($TRIAGE)"
     return 0
   fi
-  valid "$TRIAGE" | jq -r --slurpfile log <(valid "$LOG") "$JQ_LIB"'
+  valid "$TRIAGE" | jq -nr --slurpfile log <(valid "$LOG") "$JQ_LIB"'
     def dash: if . == null or . == "" then "-" else . end;
     def pad8: if length < 8 then (. + "        ")[0:8] else . end;
-    . as $d
-    | [$log[] | select(hit($d))] as $h
+    # Entries are prepared once and indexed by tool; a decision naming a tool
+    # only looks at that tool'"'"'s entries.
+    [$log[] | . + {_et: (.ts | epoch)}] as $L
+    | ($L | group_by(.tool // "") | map({key: (.[0].tool // ""), value: .}) | from_entries) as $by_tool
+    | inputs
+    | . as $d
+    | [(if ($d.tool // "") != "" then ($by_tool[$d.tool] // []) else $L end)[] | select(hit($d))] as $h
     | ($d.ts | epoch) as $dt
     | ($h | length) as $n
-    | ([$h[] | select((.ts | epoch) > $dt)] | length) as $m
+    | ([$h[] | select(._et > $dt)] | length) as $m
     | (if $d.status == "fixed" and $m > 0 then "  <-- FIXED BUT STILL BITING"
        elif $d.status == "wontfix" and $m >= 5 then "  <-- wontfix re-surfacing (>=5 since)"
        else "" end) as $flag
@@ -369,19 +460,25 @@ do_triage() {
 # there is none, the latest one before it decides the state.
 do_annotate() {
   [ -s "$LOG" ] || return 0
-  valid "$LOG" | jq -nc --slurpfile dec <(valid "$TRIAGE") "$JQ_LIB"'
-    def latest($c): if ($c | length) == 0 then null else ($c | max_by(._dt)) end;
+  valid "$LOG" | jq -nc --argjson f "$FILTER" --slurpfile dec <(valid "$TRIAGE") "$JQ_LIB"'
+    # Ties on time go to the later ledger line (_i), as a plain scan would.
+    def latest($c): if ($c | length) == 0 then null else ($c | max_by([._dt, ._i])) end;
     def state: {fixed: "regressed", ticketed: "after_ticketed", wontfix: "after_wontfix"}[.status];
     def tag($d; $s):
       if $d == null then null
       else {state: $s, status: $d.status, decision_ts: $d.ts, tool: $d.tool, match: $d.match,
             fixable: $d.fixable, reason: $d.reason, ref: $d.ref} end;
-    # Each decision epoch is computed once, not once per entry.
-    [$dec[] | . + {_dt: (.ts | epoch)}] as $D
+    # Decisions are prepared once and indexed by tool, so each entry is only
+    # checked against its own tool'"'"'s decisions plus the few without a tool.
+    [$dec | to_entries[] | .value + {_dt: (.value.ts | epoch), _i: .key}] as $D
+    | ($D | map(select((.tool // "") != "")) | group_by(.tool)
+       | map({key: .[0].tool, value: .}) | from_entries) as $by_tool
+    | [$D[] | select((.tool // "") == "")] as $no_tool
     | inputs
+    | select(keep($f))
     | . as $e
     | ($e.ts | epoch) as $et
-    | [$D[] | select(. as $d | $e | hit($d))] as $cov
+    | [(($by_tool[$e.tool // ""] // []) + $no_tool)[] | select(. as $d | $e | hit($d))] as $cov
     | latest([$cov[] | select(._dt >= $et)]) as $after
     | latest([$cov[] | select(._dt < $et)]) as $before
     | $e + {triage: (
@@ -390,14 +487,105 @@ do_annotate() {
         else null end)}'
 }
 
+# --group: everything the papercuts skill needs, as one JSON object. Active
+# entries (untriaged or after a ticketed decision) are grouped by tool; fixes
+# that didn't hold and wontfix decisions that keep coming back are separate.
+do_group() {
+  do_annotate | jq -sc --argjson limit "$LIMIT" --argjson top "$TOP" "$JQ_LIB"'
+    def counts(f): group_by(f) | map({key: (.[0] | f | tostring), value: length}) | from_entries;
+    def newest_first: sort_by(.ts | epoch) | reverse;
+    def show: newest_first | .[:$limit] | map({ts, agent, category, fixable, project, text});
+    def omitted: if length > $limit then length - $limit else 0 end;
+    def by_decision: group_by([.triage.decision_ts, .triage.tool, .triage.match, .triage.fixable]);
+    map(map_values(safe) | .triage |= (if . then map_values(safe) else . end)) as $all
+    | [$all[] | select(.triage == null or .triage.state == "after_ticketed")] as $active
+    | ($active | group_by(.tool // "") | length) as $group_count
+    | {
+        entries: ($all | length),
+        group_count: $group_count,
+        states: ($all | counts(.triage.state // "untriaged")),
+        groups: ($active | group_by(.tool // "") | map({
+            tool: (.[0].tool // ""),
+            count: length,
+            first: (newest_first | last | .ts),
+            last: (newest_first | first | .ts),
+            categories: counts(.category // ""),
+            agents: counts(.agent // "unknown"),
+            fixable: counts(.fixable // ""),
+            projects: (map(.project // "") | unique),
+            tickets: ([.[] | select(.triage.state == "after_ticketed") | .triage.ref // "-"] | unique),
+            entries: show,
+            omitted: omitted
+          }) | sort_by([-.count, -(.last | epoch)]) | if $top > 0 then .[:$top] else . end),
+        regressions: ([$all[] | select(.triage.state == "regressed")] | by_decision | map({
+            tool: .[0].triage.tool, match: .[0].triage.match, fixable: .[0].triage.fixable,
+            fixed_at: .[0].triage.decision_ts, reason: .[0].triage.reason, ref: .[0].triage.ref,
+            count: length, last: (newest_first | first | .ts), entries: show, omitted: omitted
+          }) | sort_by(-.count)),
+        wontfix_resurfacing: ([$all[] | select(.triage.state == "after_wontfix")] | by_decision
+          | map(select(length >= 5) | {
+            tool: .[0].triage.tool, match: .[0].triage.match, decided_at: .[0].triage.decision_ts,
+            reason: .[0].triage.reason, count: length, entries: show, omitted: omitted
+          }) | sort_by(-.count)),
+        already_fixed: ([$active[] | select(.triage == null and .fixable == "fixed")]
+          | {count: length, tools: counts(.tool // "")}),
+        resolved: ([$all[] | select(.triage.state == "resolved")]
+          | {entries: length, decisions: (by_decision | length)})
+      }'
+}
+
+# --stats: counts and trends for a person to read, plus how often each agent
+# logs per session (a rate near zero means its instructions aren't reaching it).
+do_stats() {
+  local claude codex grok
+  claude=$(find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' -mtime "-$WINDOW_DAYS" 2>/dev/null | wc -l)
+  codex=$(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -mtime "-$WINDOW_DAYS" 2>/dev/null | wc -l)
+  grok=$(find "$HOME/.grok/sessions" -mindepth 2 -maxdepth 2 -type d -mtime "-$WINDOW_DAYS" 2>/dev/null | wc -l)
+  valid "$LOG" | jq -rs --argjson f "$FILTER" --argjson days "$WINDOW_DAYS" \
+    --argjson sessions "{\"claude\": $claude, \"codex\": $codex, \"grok\": $grok}" "$JQ_LIB"'
+    def pad($n): tostring | . + (" " * ([$n - length, 0] | max));
+    def two: (. * 100 | round) as $c
+      | "\($c / 100 | floor).\($c % 100 | tostring | if length < 2 then "0" + . else . end)";
+    def table($xs): $xs | map("  \(.key | pad(12)) \(.value)") | join("\n");
+    def counts(f): group_by(f) | map({key: (.[0] | f | tostring | safe), value: length}) | sort_by(-.value);
+    (now - $days * 86400) as $from
+    | . as $everything
+    | [.[] | select(keep($f))] as $all
+    | [range(13; -1; -1) | (now - . * 86400) | strflocaltime("%Y-%m-%d")] as $daylist
+    | ($all | map(.ts[0:10]) | group_by(.) | map({key: .[0], value: length}) | from_entries) as $per_day
+    | [$everything[] | select((.ts | epoch) >= $from)] as $recent
+    | "entries: \($all | length)",
+      "by category:", table($all | counts(.category // "")),
+      "by agent:", table($all | counts(.agent // "unknown")),
+      "by fixable:", table($all | counts(.fixable // "")),
+      "top projects:", table($all | counts(.project // "") | .[:10]),
+      "last 14 days:", ($daylist | map("  \(.)  \($per_day[.] // 0)") | join("\n")),
+      "papercuts per session, last \($days) days:",
+      (["claude", "codex", "grok"] | map(. as $a
+        | ([$recent[] | select(.agent == $a)] | length) as $n
+        | $sessions[$a] as $s
+        | "  \($a | pad(8)) \($n) / \($s) sessions = "
+          + (if $s > 0 then ($n / $s | two) else "-" end))
+        | join("\n")),
+      "  (\([$recent[] | select((.agent // "unknown") == "unknown")] | length) more with no agent)"'
+}
+
+MODE_NAME="${1:-}"
 case "${1:-}" in
   --resolve) shift; do_resolve "$@" ;;
   --triage) shift; no_args "$@"; do_triage ;;
-  --annotate) shift; no_args "$@"; do_annotate ;;
+  --annotate) shift; parse_filters "$@"; do_annotate ;;
+  --group) shift; parse_filters "$@"; do_group ;;
+  --stats) shift; parse_filters "$@"; do_stats ;;
   --help | -h) shift; no_args "$@"; usage ;;
   --version) shift; no_args "$@"; echo "papercut $VERSION" ;;
   --count) shift; no_args "$@"; do_count ;;
   --where) shift; no_args "$@"; printf 'log: %s\nledger: %s\n' "$LOG" "$TRIAGE" ;;
-  --tail) shift; [ $# -le 1 ] || die "unexpected argument '$2'"; do_tail "${1:-}" ;;
+  --tail)
+    shift
+    n=10
+    case "${1:-}" in "" | -*) ;; *[!0-9]*) die "--tail takes a number, got '$1'" ;; *) n="$1"; shift ;; esac
+    parse_filters "$@"
+    do_tail "$n" ;;
   *) do_write "$@" ;;
 esac

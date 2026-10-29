@@ -162,7 +162,7 @@ out=$(pc --help); rc=$?
 check "--help exits 0" 0 "$rc"
 check "--help documents --resolve" 1 "$([[ "$out" == *--resolve* ]] && echo 1 || echo 0)"
 check "-h same as --help" "$out" "$(pc -h)"
-check "--version" 'papercut 0.1.0' "$(pc --version)"
+check "--version" 'papercut 0.2.0' "$(pc --version)"
 
 echo '# --resolve validation (exit 2, ledger untouched)'
 reset
@@ -342,6 +342,96 @@ check "default state dir: ~/.local/state/papercut" "log: $xh/.local/state/paperc
 check "...or XDG_STATE_HOME/papercut" "log: $xh/st/papercut/papercuts.jsonl" "$(where XDG_STATE_HOME="$xh/st")"
 env -u PAPERCUT_LOG -u PAPERCUT_TRIAGE -u XDG_STATE_HOME HOME="$T/never" "$PC" --help >/dev/null
 check "read modes create no directories" no "$([[ -e "$T/never" ]] && echo yes || echo no)"
+
+echo '# read filters'
+reset
+nowts=$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z | sed 's/\([0-9][0-9]\)$/:\1/')
+r() { # ts agent category tool fixable project text
+  jq -nc --arg ts "$1" --arg agent "$2" --arg c "$3" --arg tool "$4" --arg f "$5" --arg p "$6" --arg text "$7" \
+    '{ts:$ts,session_id:"s",agent:$agent,project:$p,cwd:("/x/" + $p),git_branch:"",category:$c,tool:$tool,text:$text,fixable:$f}' >> "$LOG"
+}
+r 2000-01-01T00:00:00Z claude docs gh no -Users-a-web 'old gh'
+r "$nowts" codex shell rg yes -Users-a-api 'new rg'
+r "$nowts" claude shell rg fixed -Users-a-web 'new rg fixed'
+ann() { pc --annotate "$@" | jq -r .text | sort | tr '\n' '|'; }
+check "--since 7d" "new rg|new rg fixed|" "$(ann --since 7d)"
+check "--since 12h" "new rg|new rg fixed|" "$(ann --since 12h)"
+check "--since a date" "new rg|new rg fixed|" "$(ann --since 2001-01-01)"
+check "--agent" "new rg|" "$(ann --agent codex)"
+check "--category" "old gh|" "$(ann --category docs)"
+check "--tool is exact" "new rg|new rg fixed|" "$(ann --tool rg)"
+check "--fixable" "new rg fixed|" "$(ann --fixable fixed)"
+check "--project matches project or cwd" "new rg|" "$(ann --project a-api)"
+check "filters combine" "new rg fixed|" "$(ann --tool rg --agent claude)"
+check "--tail with a filter" 1 "$(pc --tail 5 --agent codex | grep -c 'new rg')"
+check "--tail N with a filter keeps the newest N" 1 "$(pc --tail 1 --tool rg | grep -c 'fixable=fixed')"
+for bad in 'x' '7' '7w' '2026-13-45x' '2026-02-30'; do
+  pc --annotate --since "$bad" >/dev/null 2>&1; check "--since '$bad' exits 2" 2 "$?"
+done
+pc --group --category nope >/dev/null 2>&1; check "bad --category in a read mode exits 2" 2 "$?"
+pc --group --fixable maybe >/dev/null 2>&1; check "bad --fixable in a read mode exits 2" 2 "$?"
+pc --group --bogus >/dev/null 2>&1; check "unknown flag in a read mode exits 2" 2 "$?"
+pc --group --limit x >/dev/null 2>&1; check "--limit needs a number" 2 "$?"
+pc --stats stray >/dev/null 2>&1; check "stray argument in a read mode exits 2" 2 "$?"
+
+echo '# --group'
+reset
+for i in 1 2 3; do e "2026-01-0${i}T00:00:00-07:00" rg "rg open $i" no; done
+e 2026-01-04T00:00:00-07:00 gh 'gh open' yes
+e 2026-01-05T00:00:00-07:00 gh 'gh self-fixed' fixed
+e 2026-01-01T00:00:00-07:00 fd 'fd before fix' no
+e 2026-03-01T00:00:00-07:00 fd 'fd came back' no
+for i in 1 2 3 4 5; do e "2026-03-0${i}T00:00:00-07:00" docker "docker again $i" no; done
+e 2026-03-01T00:00:00-07:00 zz 'after ticket' no
+printf 'not json\n' >> "$LOG"
+d '{"ts":"2026-02-01T00:00:00-07:00","tool":"fd","match":null,"status":"fixed","reason":"fd fix","ref":"PR#9"}'
+d '{"ts":"2026-02-01T00:00:00-07:00","tool":"docker","match":null,"status":"wontfix","reason":"upstream","ref":null}'
+d '{"ts":"2026-02-01T00:00:00-07:00","tool":"zz","match":null,"status":"ticketed","reason":null,"ref":"T-7"}'
+g=$(pc --group)
+check "--group is one line of JSON" 1 "$(printf '%s\n' "$g" | grep -c .)"
+check "entries skip damaged lines" 13 "$(jq .entries <<<"$g")"
+check "states" '{"after_ticketed":1,"after_wontfix":5,"regressed":1,"resolved":1,"untriaged":5}' "$(jq -c '.states' <<<"$g")"
+check "groups hold open entries, biggest first" "rg:3 gh:2 zz:1" "$(jq -r '[.groups[] | "\(.tool):\(.count)"] | join(" ")' <<<"$g")"
+check "group_count counts all groups" 3 "$(jq .group_count <<<"$g")"
+check "a group's first and last" "2026-01-01T00:00:00-07:00 2026-01-03T00:00:00-07:00" \
+  "$(jq -r '.groups[0] | "\(.first) \(.last)"' <<<"$g")"
+check "a group's texts, newest first" "rg open 3|rg open 2|rg open 1" "$(jq -r '[.groups[0].entries[].text] | join("|")' <<<"$g")"
+check "a group's fixable counts" '{"fixed":1,"yes":1}' "$(jq -c '.groups[] | select(.tool == "gh") | .fixable' <<<"$g")"
+check "a ticketed group carries its ref" '["T-7"]' "$(jq -c '.groups[] | select(.tool == "zz") | .tickets' <<<"$g")"
+check "regressions" "fd 1 fd fix PR#9 fd came back" \
+  "$(jq -r '.regressions[0] | "\(.tool) \(.count) \(.reason) \(.ref) \(.entries[0].text)"' <<<"$g")"
+check "wontfix resurfacing at 5" "docker 5 upstream" "$(jq -r '.wontfix_resurfacing[0] | "\(.tool) \(.count) \(.reason)"' <<<"$g")"
+check "already fixed" '{"count":1,"tools":{"gh":1}}' "$(jq -c '.already_fixed' <<<"$g")"
+check "resolved" '{"entries":1,"decisions":1}' "$(jq -c '.resolved' <<<"$g")"
+check "--limit trims texts and counts the rest" "1 2" "$(pc --group --limit 1 | jq -r '.groups[0] | "\(.entries | length) \(.omitted)"')"
+check "--top keeps the biggest groups" "rg" "$(pc --group --top 1 | jq -r '[.groups[].tool] | join(" ")')"
+check "--group with a filter" "gh:2" "$(pc --group --tool gh | jq -r '[.groups[] | "\(.tool):\(.count)"] | join(" ")')"
+e 2026-03-09T00:00:00-07:00 x "$(printf 'esc \033]0;t\007 here')" no
+check "--group strips control characters" 0 "$(pc --group | grep -c $'\x1b')"
+reset
+check "--group with no log" '{"entries":0,"group_count":0}' "$(pc --group | jq -c '{entries, group_count}')"
+
+echo '# --stats'
+reset
+mkdir -p "$HOME/.claude/projects/p" "$HOME/.codex/sessions/2026/10" "$HOME/.grok/sessions/c/s1"
+: > "$HOME/.claude/projects/p/a.jsonl"; : > "$HOME/.claude/projects/p/b.jsonl"
+: > "$HOME/.codex/sessions/2026/10/rollout-1.jsonl"
+r "$nowts" claude shell rg no -Users-a-web 'c1'
+r "$nowts" claude docs gh no -Users-a-web 'c2'
+r "$nowts" claude docs gh no -Users-a-api 'c3'
+r "$nowts" codex docs gh no -Users-a-api 'x1'
+r "$nowts" unknown docs gh no -Users-a-api 'u1'
+r 2000-01-01T00:00:00Z claude docs gh no -Users-a-old 'too old for the rate'
+st=$(pc --stats)
+check "--stats total" 1 "$(grep -c '^entries: 6$' <<<"$st")"
+check "--stats by category, biggest first" "docs 5|shell 1" "$(sed -n '/^by category:/,/^by agent:/p' <<<"$st" | sed -n 's/^  \([a-z]*\) *\([0-9]*\)$/\1 \2/p' | tr '\n' '|' | sed 's/|$//')"
+check "--stats rate for claude: 3 / 2 sessions" 1 "$(grep -cE '^  claude +3 / 2 sessions = 1\.50$' <<<"$st")"
+check "--stats rate for codex: 1 / 1" 1 "$(grep -cE '^  codex +1 / 1 sessions = 1\.00$' <<<"$st")"
+check "--stats rate for grok: 0 / 1" 1 "$(grep -cE '^  grok +0 / 1 sessions = 0\.00$' <<<"$st")"
+check "--stats counts entries with no agent" 1 "$(grep -c '(1 more with no agent)' <<<"$st")"
+check "--stats has 14 days of trend" 14 "$(sed -n '/^last 14 days:/,/^papercuts per session/p' <<<"$st" | grep -cE '^  [0-9]{4}-[0-9]{2}-[0-9]{2}  [0-9]+$')"
+check "--stats --since sets the rate window" 1 "$(pc --stats --since 3d | grep -c 'last 3 days')"
+check "--stats with a filter" 1 "$(pc --stats --agent codex | grep -c '^entries: 1$')"
 
 echo '# concurrency'
 reset
