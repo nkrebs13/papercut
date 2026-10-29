@@ -14,7 +14,7 @@ bash, curl, tar, [jq](https://jqlang.org), python3. The Codex `config.toml` edit
 
 ## Install
 
-Every agent with a home directory (`~/.claude`, `~/.codex`, `~/.grok`):
+Every agent with a home directory (`~/.claude`, `~/.codex`, `~/.grok`). With none of them present, pass `--agents`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nkrebs13/papercut/main/get.sh | bash
@@ -50,10 +50,10 @@ Agents log on their own. To review the log, run the skill in Claude Code or Grok
 /papercuts                # ranked friction, grouped by root cause
 /papercuts --since 7d     # last 7 days
 /papercuts --tool gh      # one tool
-/papercuts stats          # counts and trends per agent
+/papercuts stats          # counts, 14-day trend, per-agent rates
 ```
 
-Each group names the file to change. The skill can fix the top item and record resolved items so they drop off the list.
+Each group names the file to change. The skill can fix the top item and record decisions. Resolved items drop off the list; a fix that didn't hold returns to it.
 
 The log is `~/.local/state/papercut/papercuts.jsonl`, shared by all agents. `PAPERCUT_LOG` or `XDG_STATE_HOME` moves it, and `papercut --where` prints the path. `papercut --help` documents the CLI.
 
@@ -63,7 +63,7 @@ The log is `~/.local/state/papercut/papercuts.jsonl`, shared by all agents. `PAP
 git clone https://github.com/nkrebs13/papercut.git && cd papercut && ./install.sh
 ```
 
-The installed symlinks point into the clone. After `git pull`, re-run `./install.sh` to refresh the `AGENTS.md` copies for Codex and Grok.
+The installed symlinks point into the clone, so keep it in place. After `git pull`, re-run `./install.sh` to refresh the `AGENTS.md` copies for Codex and Grok.
 
 ```bash
 shellcheck bin/papercut install.sh get.sh tests/*.sh
