@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+      - name: shellcheck
+        run: shellcheck bin/papercut install.sh tests/*.sh
+      - name: Tests
+        run: for t in tests/test-*.sh; do bash "$t" || exit 1; done
+      - name: Tests under the macOS system bash (3.2)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32" && ln -s /bin/bash "$RUNNER_TEMP/bash32/bash"
+          export PATH="$RUNNER_TEMP/bash32:$PATH"
+          bash --version | head -1
+          for t in tests/test-*.sh; do /bin/bash "$t" || exit 1; done
+      - name: Installer tests without tomllib (python < 3.11)
+        run: |
+          mkdir -p "$RUNNER_TEMP/notoml"
+          echo 'raise ImportError("simulated python < 3.11")' > "$RUNNER_TEMP/notoml/tomllib.py"
+          PYTHONPATH="$RUNNER_TEMP/notoml" bash tests/test-install.sh

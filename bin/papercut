@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+#
+# papercut - log the friction you hit while working, then keep working.
+#
+# A "papercut" is a small piece of friction: a CLI that lacked a flag, a stale
+# README, a shell quoting trap. Coding agents (Claude Code, Codex, Grok, ...)
+# append one line per papercut to a shared JSONL log. Later you read the log
+# back, group it, and record decisions ("fixed", "wontfix", "ticketed") in a
+# separate triage ledger. Neither file is ever rewritten, so many sessions can
+# append at once.
+#
+# Inspired by Steve Ruiz's papercuts tool:
+#   https://x.com/steveruizok/status/2075303919664734295
+#
+# USAGE
+#   papercut [--tool NAME] [--category CAT] [--fixable V] [--agent NAME]
+#            [--fixed] [--] TEXT...
+#   papercut [flags] -              read the text from piped stdin
+#   papercut --resolve --status STATUS SELECTORS... [--reason TEXT]
+#   papercut --tail [N] | --count | --triage | --annotate | --where
+#   papercut --help | --version
+#
+# EXAMPLES
+#   papercut --tool rg 'searching callers -> unquoted glob aborted -> quote it'
+#   papercut --category docs --tool gh 'README lists a removed flag -> fix it'
+#   papercut --tool 'pnpm test' --fixed 'ran from the wrong cwd -> documented'
+#   papercut --tool rg - <<'EOF'
+#   text with 'quotes', `backticks` and $vars goes in verbatim
+#   EOF
+#   papercut --resolve --status fixed --tool rg --reason 'quoted' --ref PR#42
+#
+# The first argument picks the mode; anything else is write mode. Write mode
+# prints nothing on success.
+#
+# WRITE MODE (flags may appear anywhere among the text words)
+#   --tool NAME      what caused the friction; the clustering key
+#   --category CAT   tooling (default), env, docs, shell, test, codebase, other
+#   --fixable V      yes = you could have fixed it but didn't; no (default) =
+#                    not yours to fix; fixed = you fixed it
+#   --fixed          same as --fixable fixed
+#   --agent NAME     override the detected agent name
+#   -                read the text from stdin (not from a terminal); quotes,
+#                    backticks and $ are kept as-is
+#   --               everything after this is text, even words starting with -
+# Words are joined with spaces and newlines become spaces. Text longer than
+# 2000 characters is cut there. Each entry has the fields ts, session_id,
+# agent, project, cwd, git_branch, category, tool, text and fixable.
+#
+# READ MODES
+#   --tail [N]       last N entries (default 10), human-readable
+#   --count          total entries, and entries from the current session
+#   --triage         recorded decisions, with how many entries each covers and
+#                    how many arrived after it
+#   --annotate       every entry as JSON, plus a "triage" field saying which
+#                    decision covers it
+#   --where          the log and ledger paths in use
+# Lines that aren't valid JSON are skipped, so one damaged line never hides
+# the rest.
+#
+# RESOLVE MODE (record a decision about a cluster of papercuts)
+#   --status S       fixed, wontfix or ticketed (required)
+#   --tool NAME      select entries whose tool is exactly NAME
+#   --match RE       select entries whose text matches RE (case-insensitive,
+#                    jq regex)
+#   --fixable V      select entries by their fixable value
+#   --reason TEXT    why; required for fixed and wontfix
+#   --ref TEXT       a pointer such as PR#42 or an issue number
+#   --dry-run        show what would be recorded; write nothing
+# Give at least one selector; all the selectors given must match. A decision
+# that matches no entry is refused. A decision covers the entries logged up to
+# its time. An entry logged after the latest decision covering it is flagged:
+# after "fixed" it's a regression; after "wontfix", --triage flags 5 or more.
+#
+# FILES AND ENVIRONMENT
+#   PAPERCUT_LOG     the log (default: papercuts.jsonl in the state dir)
+#   PAPERCUT_TRIAGE  the ledger (default: triage.jsonl in the state dir)
+#   PAPERCUT_AGENT   agent name to record instead of the detected one
+# The state dir is ${XDG_STATE_HOME:-~/.local/state}/papercut.
+#
+# Agent detection: CODEX_THREAD_ID or CODEX_SESSION_ID means Codex (session id
+# from the same variable); CLAUDECODE or CLAUDE_CODE_SESSION_ID means Claude
+# Code (session id from CLAUDE_CODE_SESSION_ID). Grok sets no known marker, so
+# Grok passes --agent grok. --agent beats PAPERCUT_AGENT, which beats
+# detection.
+#
+# EXIT CODES
+#   0 success   1 couldn't read or write a file   2 usage error   3 no jq
+#
+# DEPENDENCIES
+#   bash 3.2+ and jq; git is optional (records the branch). macOS and Linux.
+
+VERSION="0.1.0"
+MAX_TEXT=2000
+
+set -u
+set -o pipefail
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "papercut: jq is required but not found in PATH" >&2
+  exit 3
+fi
+
+usage() { awk 'NR >= 3 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; }
+die() { printf 'papercut: %s\n' "$*" >&2; exit 2; }
+die_flag() { # flag [context]
+  printf "papercut: unknown flag '%s'%s\nRun 'papercut --help' for usage.\n" "$1" "${2:+ for $2}" >&2
+  exit 2
+}
+no_args() { [ $# -eq 0 ] || die "unexpected argument '$1'"; }
+now() { date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z | sed 's/\([0-9][0-9]\)$/:\1/'; }
+valid_fixable() { case "$1" in yes | no | fixed) return 0 ;; *) return 1 ;; esac; }
+
+# Agent and session detection. Codex is checked first: a Codex run launched from
+# inside Claude Code inherits Claude's variables, and the innermost agent logs.
+AGENT="unknown"
+SESSION="unknown"
+if [ -n "${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}" ]; then
+  AGENT="codex"
+  SESSION="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  AGENT="claude"
+  SESSION="${CLAUDE_CODE_SESSION_ID:-unknown}"
+fi
+[ -n "${PAPERCUT_AGENT:-}" ] && AGENT="$PAPERCUT_AGENT"
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/papercut"
+LOG="${PAPERCUT_LOG:-$STATE_DIR/papercuts.jsonl}"
+TRIAGE="${PAPERCUT_TRIAGE:-$STATE_DIR/triage.jsonl}"
+
+# Shared jq library for resolve, triage and annotate.
+# epoch: ISO-8601 -> unix seconds, minus the UTC offset, so orderings compare
+# instants (10:00-08:00 is 18:00Z), not strings.
+# safe: strip control characters before printing text a terminal will render.
+# hit($d): does decision $d cover the entry? Every non-empty selector must pass.
+# shellcheck disable=SC2016  # jq program text: $vars are jq's, not the shell's
+JQ_LIB='
+def epoch:
+  (. // "" | tostring) as $s
+  | (try (($s[0:19] + "Z") | fromdateiso8601) catch null) as $t
+  | if $t == null then 0 else
+      $s[19:] as $z
+      | $t - (if $z == "" or $z == "Z" then 0
+              else (try (($z[1:3] | tonumber) * 3600 + ($z[4:6] | tonumber) * 60) catch 0)
+                   * (if $z[0:1] == "-" then -1 else 1 end)
+              end)
+    end;
+def safe: if type == "string" then gsub("[[:cntrl:]]"; "") else . end;
+def hit($d):
+  ($d.tool // "") as $t | ($d.match // "") as $m | ($d.fixable // "") as $f
+  | ($t != "" or $m != "" or $f != "")
+    and ($t == "" or (.tool // "") == $t)
+    and ($m == "" or (try ((.text // "") | test($m; "i")) catch false))
+    and ($f == "" or (.fixable // "") == $f);
+'
+
+# valid FILE: the file's JSON lines, skipping any that don't parse.
+valid() { [ -f "$1" ] || return 0; jq -c -R 'fromjson? // empty' "$1"; }
+
+# append FILE LINE: add one line. bash's printf may split a long line into
+# several writes, which concurrent appenders can interleave; cat copies the
+# small temp file in a single write.
+append() {
+  local file="$1" tmp
+  mkdir -p "$(dirname "$file")" 2>/dev/null
+  tmp=$(mktemp "${TMPDIR:-/tmp}/papercut.XXXXXX") || { echo "papercut: can't create a temp file" >&2; exit 1; }
+  if printf '%s\n' "$2" > "$tmp" && cat "$tmp" >> "$file"; then
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
+    echo "papercut: couldn't write to $file" >&2
+    exit 1
+  fi
+}
+
+do_write() {
+  local tool="" category="tooling" fixable="no" agent="$AGENT" text="" n=0 piece
+
+  add_text() { if [ "$n" -gt 0 ]; then text="$text $1"; else text="$1"; fi; n=$((n + 1)); }
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tool | --category | --fixable | --agent)
+        [ $# -ge 2 ] || die "$1 requires a value"
+        case "$1" in
+          --tool) tool="$2" ;;
+          --category) category="$2" ;;
+          --fixable) fixable="$2" ;;
+          --agent) agent="$2" ;;
+        esac
+        shift 2 ;;
+      --fixed) fixable="fixed"; shift ;;
+      -)
+        if [ -t 0 ]; then
+          die "'-' reads the text from piped stdin (e.g. a <<'EOF' heredoc)"
+        fi
+        piece=$(cat)
+        add_text "$piece"
+        shift ;;
+      --)
+        shift
+        for piece in "$@"; do add_text "$piece"; done
+        break ;;
+      -*) die_flag "$1" ;;
+      *) add_text "$1"; shift ;;
+    esac
+  done
+
+  if [ -z "${text//[[:space:]]/}" ]; then
+    printf "papercut: no complaint text given\nRun 'papercut --help' for usage.\n" >&2
+    exit 2
+  fi
+  case "$category" in
+    tooling | env | docs | shell | test | codebase | other) ;;
+    *) printf "papercut: invalid --category '%s'\n  valid: tooling env docs shell test codebase other\n" "$category" >&2; exit 2 ;;
+  esac
+  valid_fixable "$fixable" || die "invalid --fixable '$fixable' (valid: yes no fixed)"
+
+  local project branch line
+  project=$(printf '%s' "$PWD" | tr -c 'a-zA-Z0-9' '-')
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
+
+  # jq builds the JSON, so quotes, backticks and newlines can't corrupt the log.
+  line=$(jq -nc --arg ts "$(now)" --arg sid "$SESSION" --arg agent "$agent" \
+    --arg project "$project" --arg cwd "$PWD" --arg branch "$branch" \
+    --arg category "$category" --arg tool "$tool" --arg text "$text" --arg fixable "$fixable" \
+    --argjson max "$MAX_TEXT" \
+    '{ts: $ts, session_id: $sid, agent: $agent, project: $project, cwd: $cwd,
+      git_branch: $branch, category: $category, tool: $tool,
+      text: ($text | gsub("[\\r\\n]+"; " ") | .[0:$max]), fixable: $fixable}') || exit 1
+  append "$LOG" "$line"
+}
+
+do_resolve() {
+  local dstatus="" tool="" match="" fixable="" reason="" ref="" fixable_given=0 dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --status | --tool | --match | --fixable | --reason | --ref)
+        [ $# -ge 2 ] || die "$1 requires a value"
+        case "$1" in
+          --status) dstatus="$2" ;;
+          --tool) tool="$2" ;;
+          --match) match="$2" ;;
+          --fixable) fixable="$2"; fixable_given=1 ;;
+          --reason) reason="$2" ;;
+          --ref) ref="$2" ;;
+        esac
+        shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      -*) die_flag "$1" "--resolve" ;;
+      *) die "unexpected argument '$1' for --resolve (did you forget --reason?)" ;;
+    esac
+  done
+
+  [ -n "$dstatus" ] || die "--resolve requires --status (valid: fixed wontfix ticketed)"
+  case "$dstatus" in
+    fixed | wontfix | ticketed) ;;
+    *) die "invalid --status '$dstatus' (valid: fixed wontfix ticketed)" ;;
+  esac
+  # An explicitly empty --fixable is invalid, not "no selector".
+  if [ "$fixable_given" -eq 1 ] && ! valid_fixable "$fixable"; then
+    die "invalid --fixable '$fixable' (valid: yes no fixed)"
+  fi
+  if [ -z "$tool" ] && [ -z "$match" ] && [ -z "$fixable" ]; then
+    die "--resolve needs a selector: --tool <exact tool>, --match <regex> and/or --fixable <yes|no|fixed>"
+  fi
+  if [ "$dstatus" != "ticketed" ] && [ -z "${reason//[[:space:]]/}" ]; then
+    die "--reason is required for --status $dstatus"
+  fi
+  if [ -n "$match" ]; then
+    jq -n --arg m "$match" '"" | test($m; "i")' >/dev/null 2>&1 \
+      || die "--match '$match' is not a valid regex (jq/Oniguruma syntax)"
+  fi
+
+  local dec stats n latest
+  dec=$(jq -nc --arg ts "$(now)" --arg tool "$tool" --arg match "$match" --arg st "$dstatus" \
+    --arg reason "$reason" --arg ref "$ref" --arg fixable "$fixable" --argjson hasf "$fixable_given" \
+    'def nul: if . == "" then null else . end;
+     {ts: $ts, tool: ($tool | nul), match: ($match | nul), status: $st,
+      reason: ($reason | gsub("[\\r\\n]+"; " ") | nul), ref: ($ref | nul)}
+     | if $hasf == 1 then .fixable = $fixable else . end') || exit 1
+
+  stats=$(valid "$LOG" | jq -sr --argjson d "$dec" "$JQ_LIB"'
+    [.[] | select(hit($d))] as $h
+    | "\($h | length)\t\(($h | map(.ts // "") | max_by(epoch)) // "-")"') || exit 1
+  n="${stats%%$'\t'*}"
+  latest="${stats#*$'\t'}"
+  printf "papercut: selector [tool=%s match=%s fixable=%s] matches %s log entries (latest: %s)\n" \
+    "${tool:--}" "${match:--}" "${fixable:--}" "$n" "$latest" >&2
+
+  if [ "$n" -eq 0 ]; then
+    echo "papercut: selector matches nothing — refusing to record a dead decision." >&2
+    if [ -n "$tool" ]; then
+      local k near
+      k=$(valid "$LOG" | jq -s --arg t "$tool" '[.[] | select((.tool // "") == $t)] | length')
+      if [ "${k:-0}" -gt 0 ]; then
+        echo "  tool '$tool' has $k entries, but the other selectors exclude all of them." >&2
+      else
+        near=$(valid "$LOG" | jq -sr --arg t "$tool" "$JQ_LIB"'
+          [.[] | (.tool // "") | select(. != "" and (ascii_downcase | contains($t | ascii_downcase)))]
+          | group_by(.) | map({t: .[0], n: length}) | sort_by(-.n) | .[:8][]
+          | "    \(.n) \(.t | safe)"')
+        if [ -n "$near" ]; then
+          echo "  tool values containing '$tool':" >&2
+          printf '%s\n' "$near" >&2
+        fi
+      fi
+    fi
+    echo "  list all tools: papercut --annotate | jq -r .tool | sort | uniq -c | sort -rn" >&2
+    exit 2
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    echo "papercut: --dry-run, not written: $dec" >&2
+    exit 0
+  fi
+  append "$TRIAGE" "$dec"
+  echo "papercut: recorded $dstatus decision in $TRIAGE" >&2
+}
+
+do_count() {
+  local total=0 mine=0 lines=0
+  if [ -f "$LOG" ]; then
+    lines=$(grep -c . "$LOG")
+    total=$(valid "$LOG" | grep -c .)
+    if [ "$SESSION" != "unknown" ]; then
+      mine=$(valid "$LOG" | jq -n --arg s "$SESSION" '[inputs | select(.session_id == $s)] | length')
+    fi
+  fi
+  printf 'total: %s\nthis session: %s\n' "${total:-0}" "${mine:-0}"
+  if [ "${lines:-0}" -gt "${total:-0}" ]; then
+    echo "skipped: $((lines - total)) lines that aren't valid JSON"
+  fi
+}
+
+do_tail() {
+  local n="${1:-10}"
+  case "$n" in '' | *[!0-9]*) die "--tail takes a number, got '$n'" ;; esac
+  if [ ! -f "$LOG" ]; then echo "no papercuts logged yet"; return 0; fi
+  tail -n "$n" "$LOG" | jq -r -R "$JQ_LIB"'
+    fromjson? // empty
+    | map_values(safe)
+    | "\(.ts)  \(.agent // "?")  [\(.category // "?")\(if (.tool // "") != "" then "/" + .tool else "" end)]  fixable=\(.fixable // "?")\n  \(.text)\n"'
+}
+
+do_triage() {
+  if [ ! -s "$TRIAGE" ]; then
+    echo "no triage decisions yet ($TRIAGE)"
+    return 0
+  fi
+  valid "$TRIAGE" | jq -r --slurpfile log <(valid "$LOG") "$JQ_LIB"'
+    def dash: if . == null or . == "" then "-" else . end;
+    def pad8: if length < 8 then (. + "        ")[0:8] else . end;
+    . as $d
+    | [$log[] | select(hit($d))] as $h
+    | ($d.ts | epoch) as $dt
+    | ($h | length) as $n
+    | ([$h[] | select((.ts | epoch) > $dt)] | length) as $m
+    | (if $d.status == "fixed" and $m > 0 then "  <-- FIXED BUT STILL BITING"
+       elif $d.status == "wontfix" and $m >= 5 then "  <-- wontfix re-surfacing (>=5 since)"
+       else "" end) as $flag
+    | ($d | map_values(safe)) as $d
+    | "\($d.ts)  \(($d.status // "") | pad8)  tool=\($d.tool | dash)  match=\($d.match | dash)"
+      + (if ($d.fixable // "") != "" then "  fixable=\($d.fixable)" else "" end)
+      + "\n  matches: \($n)  (after decision: \($m))\($flag)"
+      + "\n  reason: \($d.reason | dash)\n  ref: \($d.ref | dash)\n"'
+}
+
+# Each entry gets the latest covering decision at or after it ("resolved"); if
+# there is none, the latest one before it decides the state.
+do_annotate() {
+  [ -s "$LOG" ] || return 0
+  valid "$LOG" | jq -nc --slurpfile dec <(valid "$TRIAGE") "$JQ_LIB"'
+    def latest($c): if ($c | length) == 0 then null else ($c | max_by(._dt)) end;
+    def state: {fixed: "regressed", ticketed: "after_ticketed", wontfix: "after_wontfix"}[.status];
+    def tag($d; $s):
+      if $d == null then null
+      else {state: $s, status: $d.status, decision_ts: $d.ts, tool: $d.tool, match: $d.match,
+            fixable: $d.fixable, reason: $d.reason, ref: $d.ref} end;
+    # Each decision epoch is computed once, not once per entry.
+    [$dec[] | . + {_dt: (.ts | epoch)}] as $D
+    | inputs
+    | . as $e
+    | ($e.ts | epoch) as $et
+    | [$D[] | select(. as $d | $e | hit($d))] as $cov
+    | latest([$cov[] | select(._dt >= $et)]) as $after
+    | latest([$cov[] | select(._dt < $et)]) as $before
+    | $e + {triage: (
+        if $after then tag($after; "resolved")
+        elif $before then tag($before; $before | state)
+        else null end)}'
+}
+
+case "${1:-}" in
+  --resolve) shift; do_resolve "$@" ;;
+  --triage) shift; no_args "$@"; do_triage ;;
+  --annotate) shift; no_args "$@"; do_annotate ;;
+  --help | -h) shift; no_args "$@"; usage ;;
+  --version) shift; no_args "$@"; echo "papercut $VERSION" ;;
+  --count) shift; no_args "$@"; do_count ;;
+  --where) shift; no_args "$@"; printf 'log: %s\nledger: %s\n' "$LOG" "$TRIAGE" ;;
+  --tail) shift; [ $# -le 1 ] || die "unexpected argument '$2'"; do_tail "${1:-}" ;;
+  *) do_write "$@" ;;
+esac
