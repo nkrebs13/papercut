@@ -28,9 +28,11 @@ curl -fsSL https://raw.githubusercontent.com/nkrebs13/papercut/main/get.sh | bas
 
 That sets up every agent with a home directory on your machine (`~/.claude`,
 `~/.codex`, `~/.grok`): the `papercut` command, the instructions that tell
-agents when to log, and the `papercuts` skill. To choose agents, add
-`-s -- --agents claude,codex` after `bash`. Run the same line again to update.
-Every file it changes is backed up first.
+agents when to log, and the `papercuts` skill. To choose agents, or on a
+machine where none of those directories exist yet, add
+`-s -- --agents claude,codex,grok` (any subset) after `bash`. Run the same line
+again to update. Files it edits are backed up first; it never overwrites a real
+file, and when it repoints an existing symlink it prints the old target.
 
 ```bash
 ~/.local/share/papercut/install.sh --check    # what's missing or out of date
