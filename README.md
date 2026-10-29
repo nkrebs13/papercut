@@ -24,30 +24,46 @@ You don't run that yourself; your agents do. You read the results.
 
 ## Install
 
-You need bash, [jq](https://jqlang.org) and python3 (`brew install jq` or
-`apt install jq`). Python 3.11 or later is only needed for one Codex step.
+You need bash, curl, tar, [jq](https://jqlang.org) and python3 (`brew install jq`
+or `apt install jq`). Python 3.11 or later is only needed for the Codex config
+edit; without it that one step is skipped.
 
 ```bash
-git clone https://github.com/nkrebs13/papercut.git && cd papercut
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/nkrebs13/papercut/main/get.sh | bash
 ```
 
-By default this sets up every agent that has a home directory on your machine
-(`~/.claude`, `~/.codex`, `~/.grok`). To choose, pass `--agents`, for example
-`./install.sh --agents claude,codex`. Here's what it changes:
+That downloads the latest release into `~/.local/share/papercut` and sets up
+every agent that has a home directory on your machine (`~/.claude`, `~/.codex`,
+`~/.grok`). To choose, pass `--agents`:
+`curl -fsSL … | bash -s -- --agents claude,codex`. Run the same line again to
+update. Here's what it changes:
 
 | Agent | Changes |
 |---|---|
-| all | symlinks `~/.local/bin/papercut` to this checkout |
+| all | symlinks `~/.local/bin/papercut` into `~/.local/share/papercut` |
 | Claude Code | adds the instructions to `~/.claude/rules/` and the skill to `~/.claude/skills/` |
 | Codex | adds the instructions to `~/.codex/AGENTS.md`, the skill to `~/.codex/skills/`, and the log folder to the sandbox's writable folders in `~/.codex/config.toml` |
 | Grok | nothing if Claude Code is set up too, since Grok reads Claude's copy by default; otherwise the instructions and the skill in `~/.grok/` |
 
-The installer backs up every file before changing it. Keep the checkout where
-it is, since the installed pieces point into it. After a `git pull`, run
-`./install.sh` again. `./install.sh --check` reports what's out of date, and
-`./install.sh --uninstall` removes everything it added. Uninstall keeps your
-log and the `*.bak-papercut-*` backups.
+The installer backs up every file before changing it. To check or remove it:
+
+```bash
+~/.local/share/papercut/install.sh --check    # what's missing or out of date
+~/.local/share/papercut/install.sh --uninstall && rm -rf ~/.local/share/papercut
+```
+
+Uninstall removes the `papercut` command and everything else it added, and keeps
+your log and the `*.bak-papercut-*` backups.
+
+To work from a clone instead:
+
+```bash
+git clone https://github.com/nkrebs13/papercut.git && cd papercut && ./install.sh
+```
+
+It takes the same flags. The installed pieces then point into the clone (it
+repoints any made by the one-liner), so keep the clone where it is and run
+`./install.sh` again after a `git pull`.
 
 Grok reads Claude's rules and skills unless `[compat.claude]` in
 `~/.grok/config.toml` turns that off. So if you install for Claude but not
@@ -67,9 +83,11 @@ The skill then stops reporting that problem, and moves it to the top if it
 comes back. A few other commands:
 
 ```bash
-papercut --tail 5    # the latest entries
-papercut --where     # where the log is
-papercut --help      # everything else
+papercut --tail 5                 # the latest entries
+papercut --stats --since 7d       # counts, trends, and how often each agent logs
+papercut --group --tool gh        # what the skill reads, as JSON, for one tool
+papercut --where                  # where the log is
+papercut --help                   # everything else
 ```
 
 The log is one shared file for all your agents. By default it's
@@ -79,7 +97,7 @@ append-only, so many sessions can write to it at once.
 ## Develop
 
 ```bash
-shellcheck bin/papercut install.sh tests/*.sh
+shellcheck bin/papercut install.sh get.sh tests/*.sh
 (for t in tests/test-*.sh; do bash "$t" || exit 1; done)
 ```
 

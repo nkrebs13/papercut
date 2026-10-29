@@ -22,7 +22,7 @@ state() { "$HERE/install.sh" --check | awk '/^  /{print $1}' | sort | uniq -c | 
 
 if [[ "$HAVE_TOML" -eq 0 ]]; then
   # Without python3 >= 3.11 the Codex steps are skipped; the rest must still work.
-  out=$("$HERE/install.sh" 2>&1); check "without tomllib: install exits 1 (one step skipped)" 1 "$?"
+  out=$("$HERE/install.sh" 2>&1); check "without tomllib: install exits 3 (one step skipped)" 3 "$?"
   check "...says which step and why" 1 "$(grep -c 'writable_roots edit needs python3 >= 3.11' <<<"$out")"
   check "...still installs the Codex instructions" 1 "$(blocks "$HOME/.codex/AGENTS.md")"
   check "CLI symlink" "$HERE/bin/papercut" "$(readlink "$HOME/.local/bin/papercut")"
@@ -223,7 +223,7 @@ printf '[sandbox_workspace_write]\nwritable_roots = [\n  "/a",\n]\n' > "$HOME/.c
 printf '[compat.claude]\nrules = false\n' > "$HOME/.grok/config.toml"
 cp "$HOME/.codex/config.toml" "$T/c"
 out=$("$HERE/install.sh" 2>&1); rc=$?
-check "an uneditable config.toml: install exits 1" 1 "$rc"
+check "an uneditable config.toml: install exits 3" 3 "$rc"
 check "...says to add the root by hand" 1 "$(grep -c 'by hand' <<<"$out")"
 check "...leaves the config alone" same "$(cmp -s "$T/c" "$HOME/.codex/config.toml" && echo same)"
 check "...and still installs the agents after it" 1 "$(blocks "$HOME/.grok/AGENTS.md")"
@@ -244,7 +244,7 @@ export HOME="$T"
 
 # Unparseable TOML is reported, not mangled.
 printf 'not = [valid\n' > "$HOME/.codex/config.toml"; cp "$HOME/.codex/config.toml" "$T/c"
-"$HERE/install.sh" >/dev/null 2>&1; check "invalid TOML: install fails" 1 "$?"
+"$HERE/install.sh" >/dev/null 2>&1; check "invalid TOML: install exits 3" 3 "$?"
 check "invalid TOML: file untouched" same "$(cmp -s "$T/c" "$HOME/.codex/config.toml" && echo same)"
 
 echo; echo "$pass passed, $fail failed"
