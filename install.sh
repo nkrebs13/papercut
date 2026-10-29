@@ -8,6 +8,10 @@
 #                                             missing or out of date
 #   ./install.sh [--agents LIST] --uninstall  undo what install did
 #
+#   Exit codes: 0 done, 1 error, 2 usage, 3 done but a step was skipped (it
+#   says which, and what to do by hand). --check exits 1 if anything is
+#   missing or out of date.
+#
 #   LIST is a comma-separated subset of claude, codex and grok. By default it is
 #   every agent whose home directory exists (~/.claude, ~/.codex, ~/.grok);
 #   --uninstall defaults to all three. Installing never removes an agent you
@@ -435,6 +439,6 @@ elif [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
   echo "note: ~/.local/bin is not on PATH in this shell; agents fall back to ~/.local/bin/papercut"
 fi
 
-if [[ "$FAILED" -eq 1 ]]; then exit 1; fi
+if [[ "$FAILED" -eq 1 ]]; then exit 3; fi
 if [[ "$MODE" == check && "$DRIFT" -eq 1 ]]; then exit 1; fi
 exit 0

@@ -39,8 +39,9 @@ papercut --group --top 15 --limit 5 [filters]
 
 If `entries` is 0, say so plainly. Mention that agents log with `papercut '...'` as described
 in `AGENT-INSTRUCTIONS.md` (https://github.com/nkrebs13/papercut), and stop. Never invent
-entries. If there are entries but `group_count` is 0 and `regressions` is empty, say that
-everything logged is resolved, give the `resolved` counts, and stop.
+entries. If there are entries but `group_count` is 0 and both `regressions` and
+`wontfix_resurfacing` are empty, say that nothing needs attention, give the `resolved` counts,
+and stop.
 
 `papercut --group` prints one JSON object with everything triage needs. Damaged log lines
 are already skipped, and the triage ledger is already applied:
@@ -57,7 +58,8 @@ are already skipped, and the triage ledger is already applied:
 | `resolved` | Entries covered by a decision, and how many decisions cover them. |
 
 For each group you'll report whose `omitted` is above 0, load all its texts before clustering:
-`papercut --group --tool '<tool>' --limit 100` (`--tool ''` for the group without a tool).
+`papercut --group [same filters] --tool '<tool>' --limit <the group's count>` (`--tool ''` for
+the group without a tool).
 Groups with `omitted: 0` are complete. If `group_count` is more than the groups you loaded,
 say how many you skipped.
 

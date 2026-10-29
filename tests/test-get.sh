@@ -34,6 +34,27 @@ check "...with nothing left over" 0 "$(find "$HOME/.local/share" -maxdepth 1 -na
 
 bash "$HERE/get.sh" --agents claude --check >/dev/null 2>&1; check "--check passes through (exit 0)" 0 "$?"
 
+# A release whose install.sh fails is rolled back; one that only skips a step
+# (exit 3) is kept.
+mk_release() { # name exit-code
+  rm -rf "$T/rel"; mkdir -p "$T/rel/papercut-$1"
+  (cd "$HERE" && tar -cf - --exclude .git .) | tar -xf - -C "$T/rel/papercut-$1"
+  printf '#!/usr/bin/env bash\nexit %s\n' "$2" > "$T/rel/papercut-$1/install.sh"
+  tar -czf "$T/$1.tar.gz" -C "$T/rel" "papercut-$1"
+}
+mk_release broken 1
+PAPERCUT_TARBALL="$T/broken.tar.gz" bash "$HERE/get.sh" >/dev/null 2>&1; check "a failing install.sh exits non-zero" 1 "$?"
+check "...and the previous release is put back" no "$(grep -q '^exit 1$' "$DEST/install.sh" && echo yes || echo no)"
+check "...still working" 1 "$("$HOME/.local/bin/papercut" --version | grep -c '^papercut ')"
+mk_release skips 3
+PAPERCUT_TARBALL="$T/skips.tar.gz" bash "$HERE/get.sh" >/dev/null 2>&1; check "install.sh exit 3 (step skipped) is passed on" 3 "$?"
+check "...and the new release is kept" yes "$(grep -q '^exit 3$' "$DEST/install.sh" && echo yes || echo no)"
+bash "$HERE/get.sh" --agents claude >/dev/null 2>&1   # back to the real release
+check "no backup copies are left behind" 0 "$(find "$HOME/.local/share" -maxdepth 1 -name 'papercut.*' | wc -l | tr -d ' ')"
+
+head -c 1500 "$HERE/get.sh" | HOME="$T/partial" bash >/dev/null 2>&1
+check "a download cut off partway runs nothing" no "$([[ -e "$T/partial" ]] && echo yes || echo no)"
+
 printf 'not a tarball' > "$T/bad.tar.gz"
 PAPERCUT_TARBALL="$T/bad.tar.gz" bash "$HERE/get.sh" >/dev/null 2>&1; check "a bad download exits 1" 1 "$?"
 check "...and leaves the install intact" yes "$([[ -x "$DEST/bin/papercut" && -e "$HOME/.local/bin/papercut" ]] && echo yes)"
