@@ -17,7 +17,7 @@ HAVE_TOML=1; python3 -c 'import tomllib' 2>/dev/null || HAVE_TOML=0
 check() { if [[ "$2" == "$3" ]]; then pass=$((pass + 1)); echo "ok   $1"
   else fail=$((fail + 1)); printf 'FAIL %s\n  expected: %s\n  actual:   %s\n' "$1" "$2" "$3"; fi; }
 has() { [[ -L "$HOME/$1" || -f "$HOME/$1" ]] && echo yes || echo no; }
-blocks() { cat "$1" 2>/dev/null | grep -c 'papercut:begin'; }
+blocks() { if [[ -f "$1" ]]; then grep -c 'papercut:begin' "$1"; else echo 0; fi; }
 state() { "$HERE/install.sh" --check | awk '/^  /{print $1}' | sort | uniq -c | tr -s ' ' | tr '\n' ';'; }
 
 if [[ "$HAVE_TOML" -eq 0 ]]; then
@@ -149,7 +149,7 @@ fresh .claude .grok
 printf '[compat.claude]\nskills = false\n' > "$HOME/.grok/config.toml"
 "$HERE/install.sh" --agents claude,grok >/dev/null
 check "compat skills off: grok gets its own skill" yes "$(has .grok/skills/papercuts)"
-check "compat skills off: no grok block (rules still on)" 0 "$(cat "$HOME/.grok/AGENTS.md" 2>/dev/null | grep -c 'papercut:begin')"
+check "compat skills off: no grok block (rules still on)" 0 "$(blocks "$HOME/.grok/AGENTS.md")"
 
 fresh .claude .grok
 "$HERE/install.sh" --agents grok >/dev/null
