@@ -31,8 +31,9 @@ That sets up every agent with a home directory on your machine (`~/.claude`,
 agents when to log, and the `papercuts` skill. To choose agents, or on a
 machine where none of those directories exist yet, add
 `-s -- --agents claude,codex,grok` (any subset) after `bash`. Run the same line
-again to update. Files it edits are backed up first; it never overwrites a real
-file, and when it repoints an existing symlink it prints the old target.
+again to update. Files it edits in place (Codex's or Grok's `AGENTS.md`, Codex's
+`config.toml`) are backed up first. It never replaces a real file with a
+symlink, and when it repoints an existing symlink it prints the old target.
 
 ```bash
 ~/.local/share/papercut/install.sh --check    # what's missing or out of date
@@ -54,8 +55,9 @@ didn't hold comes back to the top.
 Narrow it with filters, e.g. `/papercuts --since 7d` or `/papercuts --tool gh`,
 or run `/papercuts stats` for counts, trends and how often each agent logs.
 
-The log is one append-only file shared by all your agents, at
-`~/.local/state/papercut/papercuts.jsonl`. The `papercut` CLI is for agents;
+The log is one append-only file shared by all your agents, by default at
+`~/.local/state/papercut/papercuts.jsonl` (`XDG_STATE_HOME` or `PAPERCUT_LOG`
+move it; `papercut --where` shows where it is). The `papercut` CLI is for agents;
 `papercut --help` documents it if you want to poke at the log directly.
 
 ## Develop
@@ -66,9 +68,10 @@ Work from a clone instead of the one-liner:
 git clone https://github.com/nkrebs13/papercut.git && cd papercut && ./install.sh
 ```
 
-It takes the same flags. The installed pieces then point into the clone (it
-repoints any made by the one-liner), so keep the clone where it is and run
-`./install.sh` again after a `git pull`.
+It takes the same flags. The symlinks it installs then point into the clone
+(it repoints any made by the one-liner), so keep the clone where it is. Run
+`./install.sh` again after a `git pull` to refresh the copies of the agent
+instructions in Codex's and Grok's `AGENTS.md`.
 
 ```bash
 shellcheck bin/papercut install.sh get.sh tests/*.sh
