@@ -53,7 +53,7 @@ Agents log on their own. To review the log, run the skill in Claude Code or Grok
 /papercuts stats          # counts, 14-day trend, per-agent rates
 ```
 
-Each group names the file to change. The skill can fix the top item and record decisions. Resolved items drop off the list; a fix that didn't hold returns to it.
+Each actionable group names the file to change. The skill can fix the top item and record decisions. Resolved items drop off the list; a fix that didn't hold returns to it.
 
 The log is `~/.local/state/papercut/papercuts.jsonl`, shared by all agents. `PAPERCUT_LOG` or `XDG_STATE_HOME` moves it, and `papercut --where` prints the path. `papercut --help` documents the CLI.
 
@@ -63,7 +63,7 @@ The log is `~/.local/state/papercut/papercuts.jsonl`, shared by all agents. `PAP
 git clone https://github.com/nkrebs13/papercut.git && cd papercut && ./install.sh
 ```
 
-The installed symlinks point into the clone, so keep it in place. After `git pull`, re-run `./install.sh` to refresh the `AGENTS.md` copies for Codex and Grok.
+The installed symlinks point into the clone, so keep it in place. After `git pull`, re-run `./install.sh` to refresh the copy in Codex's `AGENTS.md` (and Grok's, if Grok has one).
 
 ```bash
 shellcheck bin/papercut install.sh get.sh tests/*.sh

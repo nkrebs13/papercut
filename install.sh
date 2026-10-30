@@ -377,6 +377,8 @@ if selected codex; then
   link "$SKILL" "$HOME/.codex/skills/papercuts"
   if [[ "$HAVE_TOML" -eq 1 ]]; then
     py roots "$HOME/.codex/config.toml" "$LOG_DIR"
+  elif [[ "$MODE" == uninstall ]] && ! grep -qsF "$LOG_DIR" "$HOME/.codex/config.toml"; then
+    say ok "$HOME/.codex/config.toml (no papercut writable_roots entry to remove)"
   else
     echo "  skipped  ~/.codex/config.toml: the writable_roots edit needs python3 >= 3.11"
     FAILED=1

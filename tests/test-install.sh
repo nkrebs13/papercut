@@ -31,6 +31,22 @@ if [[ "$HAVE_TOML" -eq 0 ]]; then
   [[ "$fail" -eq 0 ]]; exit
 fi
 
+# Simulated python3 < 3.11: a tomllib.py on PYTHONPATH that fails to import.
+# Uninstall with nothing to remove from config.toml must exit 0, so the
+# documented `install.sh --uninstall && rm -rf ...` finishes. With the root
+# present it still can't edit the file, so it exits 3 and leaves it alone.
+NT="$T/notoml"; mkdir -p "$NT/py" "$NT/home/.codex"
+echo 'raise ImportError("simulated python3 < 3.11")' > "$NT/py/tomllib.py"
+cp "$T/config.orig" "$NT/home/.codex/config.toml"
+HOME="$NT/home" PYTHONPATH="$NT/py" "$HERE/install.sh" --uninstall >/dev/null 2>&1
+check "without tomllib: uninstall with no root to remove exits 0" 0 "$?"
+NT_LOG="$(dirname "$(HOME="$NT/home" "$HERE/bin/papercut" --where | sed -n 's/^log: //p')")"
+printf '[sandbox_workspace_write]\nwritable_roots = ["%s"]\n' "$NT_LOG" > "$NT/home/.codex/config.toml"
+cp "$NT/home/.codex/config.toml" "$NT/config.with-root"
+HOME="$NT/home" PYTHONPATH="$NT/py" "$HERE/install.sh" --uninstall >/dev/null 2>&1
+check "without tomllib: uninstall with the root present exits 3" 3 "$?"
+check "...and leaves config.toml alone" same "$(cmp -s "$NT/config.with-root" "$NT/home/.codex/config.toml" && echo same)"
+
 "$HERE/install.sh" >/dev/null; check "install exits 0" 0 "$?"
 check "check: all ok" " 6 ok;" "$(state)"
 check "re-run changes nothing" 6 "$("$HERE/install.sh" | grep -c '^  ok ')"
