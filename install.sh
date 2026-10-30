@@ -377,11 +377,20 @@ if selected codex; then
   link "$SKILL" "$HOME/.codex/skills/papercuts"
   if [[ "$HAVE_TOML" -eq 1 ]]; then
     py roots "$HOME/.codex/config.toml" "$LOG_DIR"
-  elif [[ "$MODE" == uninstall ]] && ! grep -qsF "$LOG_DIR" "$HOME/.codex/config.toml"; then
-    say ok "$HOME/.codex/config.toml (no papercut writable_roots entry to remove)"
   else
-    echo "  skipped  ~/.codex/config.toml: the writable_roots edit needs python3 >= 3.11"
-    FAILED=1
+    # Uninstall removes only lines carrying install.sh's markers, so with none
+    # there is nothing to edit. grep exits 2 when it can't read the file.
+    codex_cfg="$HOME/.codex/config.toml"; mark_rc=1
+    if [[ -e "$codex_cfg" ]]; then
+      mark_rc=0
+      grep -qE '(added by papercut|papercut writable root added by) install\.sh' "$codex_cfg" || mark_rc=$?
+    fi
+    if [[ "$MODE" == uninstall && "$mark_rc" -eq 1 ]]; then
+      say ok "$codex_cfg (no papercut writable_roots entry to remove)"
+    else
+      echo "  skipped  ~/.codex/config.toml: the writable_roots edit needs python3 >= 3.11"
+      FAILED=1
+    fi
   fi
 fi
 
