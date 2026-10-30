@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `install.sh --uninstall` exits 0 on python3 < 3.11 when Codex's `config.toml`
+  has no papercut entry to remove, so `--uninstall && rm -rf ~/.local/share/papercut`
+  finishes. It still exits 3 when the entry is there and can't be edited.
+
 ## 0.2.0 - 2026-10-28
 
 - One-line install: `curl -fsSL https://raw.githubusercontent.com/nkrebs13/papercut/main/get.sh | bash`

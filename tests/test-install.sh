@@ -31,6 +31,27 @@ if [[ "$HAVE_TOML" -eq 0 ]]; then
   [[ "$fail" -eq 0 ]]; exit
 fi
 
+# Simulated python3 < 3.11: a tomllib.py on PYTHONPATH that fails to import.
+# Uninstall with nothing to remove from config.toml must exit 0, so the
+# documented `install.sh --uninstall && rm -rf ...` finishes. With a root that
+# install.sh added it still can't edit the file, so it exits 3 and leaves it
+# alone. The home path is non-ASCII, so the root is stored escaped (\u00e9).
+NT="$T/notoml"; NH="$NT/hom"$'\xc3\xa9'; mkdir -p "$NT/py" "$NH/.codex"
+echo 'raise ImportError("simulated python3 < 3.11")' > "$NT/py/tomllib.py"
+cp "$T/config.orig" "$NH/.codex/config.toml"
+HOME="$NH" PYTHONPATH="$NT/py" "$HERE/install.sh" --uninstall >/dev/null 2>&1
+check "without tomllib: uninstall with no root to remove exits 0" 0 "$?"
+HOME="$NH" "$HERE/install.sh" >/dev/null 2>&1
+check "...install stores the non-ASCII root escaped" 1 "$(grep -c 'hom\\u00e9' "$NH/.codex/config.toml")"
+cp "$NH/.codex/config.toml" "$NT/config.with-root"
+HOME="$NH" PYTHONPATH="$NT/py" "$HERE/install.sh" --uninstall >/dev/null 2>&1
+check "without tomllib: uninstall with an installed root exits 3" 3 "$?"
+check "...and leaves config.toml alone" same "$(cmp -s "$NT/config.with-root" "$NH/.codex/config.toml" && echo same)"
+chmod 000 "$NH/.codex/config.toml"
+HOME="$NH" PYTHONPATH="$NT/py" "$HERE/install.sh" --uninstall >/dev/null 2>&1
+check "without tomllib: unreadable config.toml on uninstall exits 3" 3 "$?"
+chmod 600 "$NH/.codex/config.toml"
+
 "$HERE/install.sh" >/dev/null; check "install exits 0" 0 "$?"
 check "check: all ok" " 6 ok;" "$(state)"
 check "re-run changes nothing" 6 "$("$HERE/install.sh" | grep -c '^  ok ')"
