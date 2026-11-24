@@ -292,8 +292,12 @@ check "--fixable-only decision recorded" 1 "$(jq -c 'select(.fixable == "fixed")
 check "...covers the fixed entry" resolved "$(st 'gh thing')"
 check "...not the yes entry" untriaged "$(st 'gh other')"
 e 2099-01-01T00:00:00-07:00 gh 'later fixed' fixed
-check "a fixed entry after the decision is a regression" regressed "$(st 'later fixed')"
+check "a fixed entry after a --fixable-only decision stays untriaged" untriaged "$(st 'later fixed')"
+check "...and is not a regression in --triage" 0 "$(pc --triage | grep -c 'FIXED BUT STILL BITING')"
 check "--triage shows fixable=" 1 "$(pc --triage | grep -c 'fixable=fixed')"
+pc --resolve --status fixed --fixable fixed --tool gh --reason 'scoped' >/dev/null 2>&1
+e 2099-02-01T00:00:00-07:00 gh 'later fixed again' fixed
+check "a --fixable decision scoped by --tool still flags regressions" regressed "$(st 'later fixed again')"
 
 echo '# latest decision wins'
 reset

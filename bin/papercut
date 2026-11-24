@@ -83,6 +83,8 @@
 # that matches no entry is refused. A decision covers the entries logged up to
 # its time. An entry logged after the latest decision covering it is flagged:
 # after "fixed" it's a regression; after "wontfix", --triage flags 5 or more.
+# A decision selected by --fixable alone (no --tool, no --match) is a point in
+# time: it never flags later entries, so re-run it to cover new ones.
 #
 # FILES AND ENVIRONMENT
 #   PAPERCUT_LOG     the log (default: papercuts.jsonl in the state dir)
@@ -454,7 +456,9 @@ do_triage() {
     | ($d.ts | epoch) as $dt
     | ($h | length) as $n
     | ([$h[] | select(._et > $dt)] | length) as $m
-    | (if $d.status == "fixed" and $m > 0 then "  <-- FIXED BUT STILL BITING"
+    | (($d.tool // "") == "" and ($d.match // "") == "") as $field_only
+    | (if $field_only then ""
+       elif $d.status == "fixed" and $m > 0 then "  <-- FIXED BUT STILL BITING"
        elif $d.status == "wontfix" and $m >= 5 then "  <-- wontfix re-surfacing (>=5 since)"
        else "" end) as $flag
     | ($d | map_values(safe)) as $d
@@ -488,7 +492,9 @@ do_annotate() {
     | ($e.ts | epoch) as $et
     | [(($by_tool[$e.tool // "" | tostring] // []) + $no_tool)[] | select(. as $d | $e | hit($d))] as $cov
     | latest([$cov[] | select(._dt >= $et)]) as $after
-    | latest([$cov[] | select(._dt < $et)]) as $before
+    # A decision with no tool and no match names no root cause, so it covers
+    # only what was logged before it and never flags later entries.
+    | latest([$cov[] | select(._dt < $et and ((.tool // "") != "" or (.match // "") != ""))]) as $before
     | $e + {triage: (
         if $after then tag($after; "resolved")
         elif $before then tag($before; $before | state)
